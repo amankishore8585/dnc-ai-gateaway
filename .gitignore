@@ -1,0 +1,16 @@
+# Rust build output
+/target
+
+# environment files
+.env
+
+# logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# editor folders
+.vscode/
+.idea/
