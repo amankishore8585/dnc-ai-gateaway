@@ -249,7 +249,7 @@ async fn handle_client(
         let mut selected = None;
 
         for (route, lb) in map.iter_mut() {
-            if req.path.starts_with(route) {
+            if req.path == *route || req.path.starts_with(&(route.clone() + "/")) {
                 selected = lb.next();
                 break;
             }
