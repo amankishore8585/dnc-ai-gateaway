@@ -325,30 +325,7 @@ async fn handle_client(
                 }
             };
 
-    // forward request line
-    let request_line = format!("{} {} {}\r\n", req.method, req.path, req.version);
-    upstream.write_all(request_line.as_bytes()).await.unwrap();
-
-    // forward headers but override Host
-    for (k, v) in &req.headers {
-        if k.eq_ignore_ascii_case("Host") {
-            continue;
-        }
-
-        let line = format!("{}: {}\r\n", k, v);
-        upstream.write_all(line.as_bytes()).await.unwrap();
-    }
-
-    // set Host based on upstream
-    let host = upstream_addr.split(':').next().unwrap_or("");
-    let host_line = format!("Host: {}\r\n", host);
-    upstream.write_all(host_line.as_bytes()).await.unwrap();
-
-    // ensure upstream closes connection
-    upstream.write_all(b"Connection: close\r\n").await.unwrap();
-
-    // end headers
-    upstream.write_all(b"\r\n").await.unwrap();
+    upstream.write_all(request.as_bytes()).await.unwrap();
 
     // full duplex streaming
     tokio::io::copy_bidirectional(&mut client, &mut upstream)
