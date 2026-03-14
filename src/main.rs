@@ -26,7 +26,7 @@ use native_tls::TlsConnector as NativeTlsConnector;
 trait IoStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> IoStream for T {}
 
-const DEBUG: bool = false;
+const DEBUG: bool = true;
 
 type Balancers = Arc<Mutex<HashMap<String, LoadBalancer>>>;
 
@@ -241,6 +241,7 @@ async fn handle_client(
     if check_rate_limit(&api_key, &req.path, limit, &limiter, &mut client).await {
         return;
     }
+    SUCCESSFUL_REQUESTS.fetch_add(1, Ordering::Relaxed);
 
     // -------- routing --------
     let upstream_addr = {
