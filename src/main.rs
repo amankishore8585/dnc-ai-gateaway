@@ -325,7 +325,15 @@ async fn handle_client(
                 }
             };
 
-    upstream.write_all(request.as_bytes()).await.unwrap();
+    let mut modified = request.clone();
+
+    if let Some(pos) = modified.find("\r\nHost:") {
+        let end = modified[pos..].find("\r\n").unwrap() + pos;
+        let host = upstream_addr.split(':').next().unwrap_or("");
+        modified.replace_range(pos..end, &format!("\r\nHost: {}", host));
+    }
+
+    upstream.write_all(modified.as_bytes()).await.unwrap();
 
     // full duplex streaming
     tokio::io::copy_bidirectional(&mut client, &mut upstream)
