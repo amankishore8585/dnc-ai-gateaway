@@ -2,60 +2,163 @@
 
 A lightweight API Gateway written in Rust using Tokio.
 
-This project implements core gateway functionality such as authentication, rate limiting, load balancing, and backend health checks.
+The gateway sits between client applications and AI providers (such as OpenAI) and provides:
 
----
+-authentication
+-rate limiting
+-request routing
+-traffic protection
+-metrics and logging
+
+It is designed as a minimal, high-performance gateway for AI workloads.
 
 ## Why This Project Exists
 
-Modern applications often rely on API gateways to handle authentication, rate limiting, and request routing before traffic reaches backend services.
+Many modern applications rely on external AI APIs. Calling those APIs directly from applications makes it difficult to manage:
 
-This project was built as a learning exercise to explore how core gateway features work internally by implementing them from scratch in Rust.
+authentication
+rate limiting
+usage monitoring
+backend routing
+traffic protection
 
-The goal was to build a lightweight gateway capable of:
+This project explores how an AI gateway layer can be implemented from scratch using async Rust (Tokio).
 
-- Authenticating requests using API keys
-- Protecting services with rate limiting
-- Distributing traffic across multiple backends
-- Automatically detecting unhealthy services
-- Handling high concurrency using async Rust (Tokio)
+The goal was to build a simple gateway capable of protecting AI APIs and controlling traffic before it reaches backend services.
+
+## Architecture
+
+Client Application
+        |
+        v
++------------------+
+|    AI Gateway    |
+|------------------|
+| API Key Auth     |
+| Rate Limiting    |
+| Load Balancer    |
+| Health Checks    |
+| Metrics & Logs   |
++---------+--------+
+          |
+          v
++------------------+
+|   AI Provider    |
+|   (OpenAI API)   |
++------------------+
+
+## Using the Gateway from an Application
+
+Applications can call the gateway instead of calling the OpenAI API directly.
+
+The gateway forwards requests to the backend AI provider while applying authentication and rate limiting.
+
+Clients must include:
+
+X-API-Key
+
+along with their OpenAI request.
+
+## Python Example
+
+Using the official OpenAI Python client.
+
+from openai import OpenAI
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    base_url="https://dncgateway.com/v1",
+    default_headers={
+        "X-API-Key": "user1"
+    }
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[
+        {"role": "user", "content": "Hello"}
+    ]
+)
+
+print(response.choices[0].message.content)
+
+The client sends requests to the gateway:
+
+https://dncgateway.com/v1
+
+The gateway then forwards the request to the configured backend provider.
+
+## JavaScript Example
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  baseURL: "https://dncgateway.com/v1",
+  defaultHeaders: {
+    "X-API-Key": "user1"
+  }
+});
+
+const response = await client.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages: [
+    { role: "user", content: "Hello" }
+  ]
+});
+
+console.log(response.choices[0].message.content);
+
 
 ## Features
 
 * API Key Authentication
+  Requests must include an API key:
+  X-API-Key
+  Keys and limits are configured via api_keys.json.
+
 * Token Bucket Rate Limiting
+  Per-user rate limiting using a token bucket algorithm.
+
+  Example:
+
+  user1 → 2 requests/sec
+  user2 → 10 requests/sec
+
 * Round-Robin Load Balancing
+
 * Automatic Backend Health Checks
-* Backend Failover
-* Request Size Protection
-* Request Timeout Protection
-* Async Networking with Tokio
+  Backends are periodically checked and automatically marked unhealthy if they fail.
 
+* Metrics Endpoint
 
-                +------------------+
-                |      Client      |
-                |  curl / browser  |
-                +---------+--------+
-                          |
-                          |
-                          v
-                +------------------+
-                |    AI Gateway    |
-                |------------------|
-                | API Key Auth     |
-                | Rate Limiting    |
-                | Load Balancer    |
-                | Health Checks    |
-                +---------+--------+
-                          |
-            +-------------+-------------+
-            |                           |
-            v                           v
-     +-------------+             +-------------+
-     |  Backend 1  |             |  Backend 2  |
-     | 127.0.0.1   |             | 127.0.0.1   |
-     |    :9002    |             |    :9003    |
-     +-------------+             +-------------+
+  A Prometheus-style metrics endpoint is available:
+
+  /metrics
+
+  Example output:
+
+  requests_total 125
+  auth_failures 10
+  rate_limited 2
+  successful_requests 80
+
+* Logging
+
+  The gateway logs requests via systemd journald.
+
+  Example log:
+
+  Incoming Request: /v1/chat/completions
+  Routing to upstream: api.openai.com:443
+  REQUEST method=POST path=/v1/chat/completions duration_ms=420
+
+  Logs can be viewed with:
+
+  journalctl -u ai-gateway -f  
 
 
 ---
@@ -83,11 +186,21 @@ The gateway will start on:
 
 ## Example Request
 
+Basic Request
 ```
 curl -H "X-API-Key: user1" http://127.0.0.1:8080/test
 ```
 
+OpenAi request through gateway
 ---
+curl http://127.0.0.1:8080/v1/chat/completions \
+-H "Authorization: Bearer OPENAI_API_KEY" \
+-H "X-API-Key: user1" \
+-H "Content-Type: application/json" \
+-d '{
+  "model": "gpt-4o-mini",
+  "messages": [{"role": "user", "content": "hello"}]
+}'
 
 ## API Keys
 
@@ -99,36 +212,31 @@ api_keys.json
 
 Example:
 
-```
 {
   "user1": 2,
-  "user2": 10
+  "user2": 10,
+  "premium": 30
 }
-```
 
-This means:
+Meaning:
 
-* `user1` → 2 requests per second
-* `user2` → 10 requests per second
-
+user1 → 2 requests/sec
+user2 → 10 requests/sec
+premium → 30 requests/sec
 ---
 
-## Architecture
+## Metrics
+Metrics endpoint:
 
-```
-Client → Gateway → Backend Services
-```
+curl http://127.0.0.1:8080/metrics
 
-Example route configuration:
+Example output:
 
-```
-/test → 127.0.0.1:9002
-/test → 127.0.0.1:9003
-```
+requests_total 230
+auth_failures 12
+rate_limited 3
+successful_requests 180
 
-Requests are distributed using **round-robin load balancing**.
-
----
 
 ## Benchmark
 
@@ -161,6 +269,27 @@ src/
 
 ---
 
+## Future Improvements
+Possible extensions:
+
+multi-provider AI routing
+
+caching
+
+usage tracking
+
+token accounting
+
+distributed rate limiting
+
+structured logging
+
 ## License
 
 Personal project
+
+## Contact
+
+For questions, feedback, or collaboration
+
+dncsoftwarehelp@gmail.com

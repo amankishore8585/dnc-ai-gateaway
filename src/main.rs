@@ -197,6 +197,9 @@ async fn handle_client(
     let _ip = client.peer_addr()
         .map(|a| a.ip().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
+    if DEBUG {
+        println!("Incoming Request: {} from {}", req.path, ip);
+    }    
 
     //new feature
     let start = Instant::now();    
