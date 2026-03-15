@@ -194,13 +194,6 @@ async fn handle_client(
     api_keys: ApiKeys
     ){
 
-    let _ip = client.peer_addr()
-        .map(|a| a.ip().to_string())
-        .unwrap_or_else(|_| "unknown".to_string());
-    if DEBUG {
-        println!("Incoming Request: {} from {}", req.path, ip);
-    }    
-
     //new feature
     let start = Instant::now();    
     
@@ -217,12 +210,15 @@ async fn handle_client(
 
     REQUESTS_TOTAL.fetch_add(1, Ordering::Relaxed);
 
-    
+    let ip = client.peer_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
     //parsing
     let req = parse_request(&request);
 
     if DEBUG {
-        println!("Incoming Request: {}", req.path);
+        println!("Incoming Request: {} from {}", req.path, ip);
     }
 
     //metrics
