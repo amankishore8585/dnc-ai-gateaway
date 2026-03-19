@@ -148,17 +148,23 @@ console.log(response.choices[0].message.content);
 
 * Logging
 
-  The gateway logs requests via systemd journald.
+  The gateway uses structured logging via `tracing`.
 
-  Example log:
+  Each request is assigned a unique `request_id` and logs are emitted for the full request lifecycle.
 
-  Incoming Request: /v1/chat/completions
-  Routing to upstream: api.openai.com:443
-  REQUEST method=POST path=/v1/chat/completions duration_ms=420
+  Example logs:
 
-  Logs can be viewed with:
+  request_started request_id=...
+  incoming_request request_id=... path=/v1/models method=GET
+  routing request_id=... upstream=api.openai.com:443
+  upstream_client_error request_id=... upstream_status=HTTP/1.1 404 Not Found
+  request_completed request_id=... duration_ms=1149
 
-  journalctl -u ai-gateway -f  
+  Log levels:
+
+  - INFO → successful requests
+  - WARN → client errors (4xx)
+  - ERROR → upstream/server errors (5xx)
 
 
 ---
@@ -272,17 +278,14 @@ src/
 ## Future Improvements
 Possible extensions:
 
-multi-provider AI routing
+improved HTTP parsing
 
-caching
-
-usage tracking
-
-token accounting
+response inspection & analytics
 
 distributed rate limiting
 
-structured logging
+multi-provider routing
+
 
 ## License
 

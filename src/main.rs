@@ -22,13 +22,19 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use tokio_native_tls::TlsConnector;
 use native_tls::TlsConnector as NativeTlsConnector;
+use tracing::{info, warn, error};
 
 trait IoStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> IoStream for T {}
 
-const DEBUG: bool = true;
-
 type Balancers = Arc<Mutex<HashMap<String, LoadBalancer>>>;
+
+fn init_logging() {
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_level(true)
+        .init();
+}
 
 pub struct Request {
     method: String,
@@ -86,6 +92,9 @@ async fn read_request(client: &mut TcpStream) -> String {
             break;
         }
     }
+
+    // 🔥 WAIT A BIT MORE (important)
+    tokio::time::sleep(Duration::from_millis(10)).await;
     String::from_utf8_lossy(&buffer).to_string()
 }
 
@@ -106,37 +115,30 @@ async fn handle_metrics(req: &Request, client: &mut TcpStream) -> bool {
     false
 }
 
-async fn authenticate(req: &Request, client: &mut TcpStream) -> Option<String> {
-    match req.headers.get("X-API-Key") {
-        Some(key) => Some(key.to_string()),
-        None => {
-            AUTH_FAILURES.fetch_add(1, Ordering::Relaxed);
-
-            let response =
-                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 15\r\n\r\nMissing API Key";
-
-            client.write_all(response).await.ok();
-            None
-        }
-    }
+async fn authenticate(req: &Request) -> Option<String> {
+    req.headers.get("X-API-Key").cloned()
 }
 
-async fn check_api_key(
-    api_key: &str,
-    api_keys: &ApiKeys,
+
+async fn send_response(
     client: &mut TcpStream,
-) -> Option<f64> {
+    status: &str,
+    body: &str,
+    request_id: &str,
+    start: Instant,
+) {
+    let duration = start.elapsed().as_millis();
 
-    match api_keys.get(api_key) {
-        Some(limit) => Some(*limit),
-        None => {
-            let response =
-                b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+    let response = format!(
+        "HTTP/1.1 {}\r\nX-Request-ID: {}\r\nX-Response-Time: {}ms\r\nContent-Length: {}\r\n\r\n{}",
+        status,
+        request_id,
+        duration,
+        body.len(),
+        body
+    );
 
-            client.write_all(response).await.ok();
-            None
-        }
-    }
+    let _ = client.write_all(response.as_bytes()).await;
 }
 
 async fn check_rate_limit(
@@ -144,7 +146,6 @@ async fn check_rate_limit(
     path: &str,
     limit: f64,
     limiter: &RateLimiter,
-    client: &mut TcpStream,
 ) -> bool {
 
     let allowed = {
@@ -156,35 +157,27 @@ async fn check_rate_limit(
             .entry(path.to_string())
             .or_insert_with(|| TokenBucket::new(limit, limit));
 
-        let allowed = bucket.allow();
-
-        allowed
-    }; // mutex dropped here
+        bucket.allow()
+    };
 
     if !allowed {
         RATE_LIMITED.fetch_add(1, Ordering::Relaxed);
-
-        let response =
-            b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n";
-
-        client.write_all(response).await.ok();
         return true;
     }
 
     false
 }
 
-fn log_request(req: &Request, start: Instant) {
-    if DEBUG {
-        let duration = start.elapsed();
+fn log_request(req: &Request, start: Instant, request_id: &str) {
+    let duration = start.elapsed();
 
-        println!(
-            "REQUEST method={} path={} duration_ms={}",
-            req.method,
-            req.path,
-            duration.as_millis()
-        );
-    }
+    info!(
+        request_id = %request_id,
+        method = %req.method,
+        path = %req.path,
+        duration_ms = duration.as_millis(),
+        "request_completed"
+    );
 }
 
 async fn handle_client(
@@ -193,17 +186,29 @@ async fn handle_client(
     balancers: Balancers,
     api_keys: ApiKeys
     ){
+    use uuid::Uuid;
 
-    //new feature
-    let start = Instant::now();    
+    let request_id = Uuid::new_v4().to_string();
+    let start = Instant::now();
+    
+    info!(
+    request_id = %request_id,
+    "request_started"
+    );   
     
     // read request from client
     let request = match timeout(Duration::from_secs(5), read_request(&mut client)).await {
         Ok(req) => req,
         Err(_) => {
-            let response =
-                b"HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\n\r\n";
-            client.write_all(response).await.ok();
+            warn!(request_id = %request_id, "request_timeout");
+
+            send_response(
+                &mut client,
+                "408 Request Timeout",
+                "",
+                &request_id,
+                start
+            ).await;
             return;
         }
     };
@@ -217,9 +222,13 @@ async fn handle_client(
     //parsing
     let req = parse_request(&request);
 
-    if DEBUG {
-        println!("Incoming Request: {} from {}", req.path, ip);
-    }
+    info!(
+        request_id = %request_id,
+        path = %req.path,
+        method = %req.method,
+        ip = %ip,
+        "incoming_request"
+    );
 
     //metrics
     if handle_metrics(&req, &mut client).await {
@@ -227,17 +236,56 @@ async fn handle_client(
     }
 
     // 🔐 API KEY AUTHENTICATION
-    let api_key = match authenticate(&req, &mut client).await {
+    let api_key = match authenticate(&req).await {
         Some(k) => k,
-        None => return,
+        None => {
+            AUTH_FAILURES.fetch_add(1, Ordering::Relaxed);
+
+            warn!(request_id = %request_id, "missing_api_key");
+
+            send_response(
+                &mut client,
+                "401 Unauthorized",
+                "Missing API Key",
+                &request_id,
+                start
+            ).await;
+            return;
+        }
     };
 
-    let limit = match check_api_key(&api_key, &api_keys, &mut client).await {
-        Some(l) => l,
-        None => return,
+    let limit = match api_keys.get(&api_key) {
+        Some(l) => *l,
+        None => {
+            AUTH_FAILURES.fetch_add(1, Ordering::Relaxed);
+
+            warn!(request_id = %request_id, "invalid_api_key");
+
+            send_response(
+                &mut client,
+                "403 Forbidden",
+                "",
+                &request_id,
+                start
+            ).await;
+            return;
+        }
     };
 
-    if check_rate_limit(&api_key, &req.path, limit, &limiter, &mut client).await {
+    if check_rate_limit(&api_key, &req.path, limit, &limiter).await {
+        warn!(
+            request_id = %request_id,
+            path = %req.path,
+            "rate_limited"
+        );
+
+        send_response(
+            &mut client,
+            "429 Too Many Requests",
+            "",
+            &request_id,
+            start
+        ).await;
         return;
     }
     SUCCESSFUL_REQUESTS.fetch_add(1, Ordering::Relaxed);
@@ -261,15 +309,23 @@ async fn handle_client(
     let upstream_addr = match upstream_addr {
         Some(addr) => addr,
         None => {
-            let response = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-            client.write_all(response).await.ok();
+            warn!(request_id = %request_id, "route_not_found");
+
+            send_response(
+                &mut client,
+                "404 Not Found",
+                "",
+                &request_id,
+                start
+            ).await;
             return;
         }
     };
-
-    if DEBUG {
-        println!("Routing to upstream: {}", upstream_addr);
-    }
+    info!(
+        request_id = %request_id,
+        upstream = %upstream_addr,
+        "routing"
+    );
 
     // connect to backend with timeout
     let mut upstream: Box<dyn IoStream> =
@@ -283,7 +339,15 @@ async fn handle_client(
             ).await {
                 Ok(Ok(s)) => s,
                 _ => {
-                    client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await.ok();
+                    error!(request_id = %request_id, "upstream_failed");
+
+                    send_response(
+                        &mut client,
+                        "502 Bad Gateway",
+                        "",
+                        &request_id,
+                        start
+                    ).await;
                     return;
                 }
             };
@@ -294,7 +358,15 @@ async fn handle_client(
             match cx.connect(host, stream).await {
                 Ok(tls_stream) => Box::new(tls_stream),
                 Err(_) => {
-                    client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await.ok();
+                    error!(request_id = %request_id, "upstream_failed");
+
+                    send_response(
+                        &mut client,
+                        "502 Bad Gateway",
+                        "",
+                        &request_id,
+                        start
+                    ).await;
                     return;
                 }
             }
@@ -319,7 +391,15 @@ async fn handle_client(
                         }
                     }
 
-                    client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await.ok();
+                    error!(request_id = %request_id, "upstream_failed");
+
+                    send_response(
+                        &mut client,
+                        "502 Bad Gateway",
+                        "",
+                        &request_id,
+                        start
+                    ).await;
                     return;
                     }
                 }
@@ -333,8 +413,49 @@ async fn handle_client(
         modified.replace_range(pos..end, &format!("\r\nHost: {}", host));
     }
 
+
     upstream.write_all(modified.as_bytes()).await.unwrap();
 
+    let mut buffer = [0; 4096];
+
+    let n = upstream.read(&mut buffer).await.unwrap_or(0);
+
+    if n > 0 {
+        let response_chunk = String::from_utf8_lossy(&buffer[..n]);
+
+        if let Some(line) = response_chunk.lines().next() {
+            // Properly extract status code
+            let status_code = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or(0);
+
+            if status_code >= 500 {
+                error!(
+                    request_id = %request_id,
+                    upstream_status = %line,
+                    "upstream_server_error"
+                );
+            } else if status_code >= 400 {
+                warn!(
+                    request_id = %request_id,
+                    upstream_status = %line,
+                    "upstream_client_error"
+                );
+            } else {
+                info!(
+                    request_id = %request_id,
+                    upstream_status = %line,
+                    "upstream_success"
+                );
+            }
+        }
+
+        // forward first chunk to client
+        let _ = client.write_all(&buffer[..n]).await;
+    }
+    
     // full duplex streaming
     tokio::io::copy_bidirectional(&mut client, &mut upstream)
         .await
@@ -344,7 +465,7 @@ async fn handle_client(
     let _ = client.shutdown().await;    
 
     //for request log
-    log_request(&req, start);
+    log_request(&req, start, &request_id);
 }
 
 async fn health_checker(balancers: Balancers) {
@@ -393,6 +514,8 @@ async fn health_checker(balancers: Balancers) {
 
 #[tokio::main]
 async fn main() {
+    init_logging();
+
     let api_keys = load_api_keys();
     
     let limiter: RateLimiter = Arc::new(Mutex::new(HashMap::new()));
