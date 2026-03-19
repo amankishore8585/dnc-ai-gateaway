@@ -61,7 +61,7 @@ http://127.0.0.1:8080
 
 ### 4. Test it(on differnt terminal)
 
-1. Missing API Key (should return 401)
+#### 1. Missing API Key (should return 401)
 ```bash
 curl -i http://127.0.0.1:8080/test
 ```
@@ -75,7 +75,7 @@ Expected:
 - Logs show missing_api_key
 
 
-2. Invalid API Key (should return 403)
+#### 2. Invalid API Key (should return 403)
 ```bash  
   curl -i -H "X-API-Key: wrong_key" http://127.0.0.1:8080/test
 ```
@@ -87,7 +87,7 @@ Expected:
 - Logs show invalid_api_key    
 
 
-3. Valid API Key (should succeed)
+#### 3. Valid API Key (should succeed)
 ```bash  
   curl -i -H "X-API-Key: user1" http://127.0.0.1:8080/test
 ```
@@ -106,7 +106,7 @@ Now retry
 - Request is routed to backend
 
 
-4. Rate Limiting (should return 429)
+#### 4. Rate Limiting (should return 429)
 
 ```bash
   for i in {1..10}; do
@@ -123,7 +123,7 @@ Expected:
 - Logs show rate_limited    
 
 
-5. OpenAI request through gateway:
+#### 5. OpenAI request through gateway:
 ```bash
   curl -i http://127.0.0.1:8080/v1/models \
   -H "Authorization: Bearer YOUR_OPENAI_API_KEY" \
@@ -137,7 +137,7 @@ Expected:
 
 - It might show error due to wrong api key. And you can see the error in ur logs. 
 
-6. Check metrics
+#### 6. Check metrics
 
 ```
 curl http://127.0.0.1:8080/metrics
