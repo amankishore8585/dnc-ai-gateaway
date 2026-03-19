@@ -12,6 +12,8 @@ The gateway sits between client applications and AI providers (such as OpenAI) a
 
 It is designed as a minimal, high-performance gateway for AI workloads.
 
+The gateway can be run locally (self-hosted) or used via a hosted endpoint.
+
 ## Why This Project Exists
 
 Many modern applications rely on external AI APIs. Calling those APIs directly from applications makes it difficult to manage:
@@ -47,11 +49,52 @@ Client Application
 |   (OpenAI API)   |
 +------------------+
 
+## Using the Gateway
+
+You can use the gateway in two ways:
+
+1. Self-Hosted (Recommended)
+
+  Run the gateway locally or on your own VPS for full control.
+
+  cargo build --release
+  ./target/release/ai_gateaway
+
+  The gateway will be available at:
+
+  http://127.0.0.1:8080
+
+  Use this option if you want:
+
+  -full control over configuration
+  -local development and testing
+  -no dependency on external services
+
+2. Hosted Gateway (Experimental)
+
+  You can also use a hosted version of the gateway:
+
+  https://dncgateway.com/v1
+
+  ⚠️ Note: This is an early version and not production-ready.
+
+  Use this option if you want:
+  -quick setup without running infrastructure
+  -simple integration for testing  
+
 ## Using the Gateway from an Application
 
 Applications can call the gateway instead of calling the OpenAI API directly.
 
-The gateway forwards requests to the backend AI provider while applying authentication and rate limiting.
+Depending on your setup, this can be:
+
+-your local gateway (http://127.0.0.1:8080)
+
+-your own deployed instance
+
+-or the hosted gateway (https://dncgateway.com/v1)
+
+The gateway forwards requests to the backend AI provider while applying authentication and rate limiting
 
 Clients must include:
 
@@ -63,38 +106,36 @@ along with their OpenAI request.
 
 Using the official OpenAI Python client.
 
-from openai import OpenAI
-from dotenv import load_dotenv
-import os
+# Option 1: Self-hosted
+  client = OpenAI(
+      api_key=os.getenv("OPENAI_API_KEY"),
+      base_url="http://127.0.0.1:8080/v1",
+      default_headers={
+          "X-API-Key": "user1"
+      }
+  )
 
-load_dotenv()
-
-client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    base_url="https://dncgateway.com/v1",
-    default_headers={
-        "X-API-Key": "user1"
-    }
-)
-
-response = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[
-        {"role": "user", "content": "Hello"}
-    ]
-)
-
-print(response.choices[0].message.content)
-
-The client sends requests to the gateway:
-
-https://dncgateway.com/v1
-
-The gateway then forwards the request to the configured backend provider.
+# Option 2: Hosted  
+  client = OpenAI(
+      api_key=os.getenv("OPENAI_API_KEY"),
+      base_url="https://dncgateway.com/v1",
+      default_headers={
+          "X-API-Key": "user1"
+      }
+  )
 
 ## JavaScript Example
-import OpenAI from "openai";
 
+# Option 1: Self-hosted
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  baseURL: "http://127.0.0.1:8080/v1",
+  defaultHeaders: {
+    "X-API-Key": "user1"
+  }
+});
+
+# Option 2; Hosted
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   baseURL: "https://dncgateway.com/v1",
@@ -102,15 +143,6 @@ const client = new OpenAI({
     "X-API-Key": "user1"
   }
 });
-
-const response = await client.chat.completions.create({
-  model: "gpt-4o-mini",
-  messages: [
-    { role: "user", content: "Hello" }
-  ]
-});
-
-console.log(response.choices[0].message.content);
 
 
 ## Features
