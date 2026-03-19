@@ -1,32 +1,27 @@
 # AI Gateway (Rust)
 
-A lightweight API Gateway written in Rust using Tokio.
+A lightweight AI API gateway that sits between your application and AI providers (such as OpenAI) to control, protect, and observe API usage.
 
-The gateway sits between client applications and AI providers (such as OpenAI) and provides:
+## What Problem This Solves
 
--authentication
--rate limiting
--request routing
--traffic protection
--metrics and logging
+Modern applications rely heavily on AI APIs, but directly calling them creates serious issues:
 
-It is designed as a minimal, high-performance gateway for AI workloads.
+* **Uncontrolled costs** → API usage can spike unexpectedly
+* **No visibility** → difficult to track who is making requests
+* **No protection** → bots or users can spam your backend
 
-The gateway can be run locally (self-hosted) or used via a hosted endpoint.
+This gateway introduces a control layer in front of AI APIs to solve these problems.
 
-## Why This Project Exists
+## What This Gateway Provides
 
-Many modern applications rely on external AI APIs. Calling those APIs directly from applications makes it difficult to manage:
+* API key based access control
+* Per-user rate limiting (token bucket)
+* Request logging with unique request IDs
+* Metrics for monitoring usage
+* Routing and load balancing to upstream providers
 
-authentication
-rate limiting
-usage monitoring
-backend routing
-traffic protection
+It allows developers to safely manage AI API traffic before it reaches the backend.
 
-This project explores how an AI gateway layer can be implemented from scratch using async Rust (Tokio).
-
-The goal was to build a simple gateway capable of protecting AI APIs and controlling traffic before it reaches backend services.
 
 ## Architecture
 
@@ -106,7 +101,7 @@ along with their OpenAI request.
 
 Using the official OpenAI Python client.
 
-# Option 1: Self-hosted
+## Option 1: Self-hosted
   client = OpenAI(
       api_key=os.getenv("OPENAI_API_KEY"),
       base_url="http://127.0.0.1:8080/v1",
@@ -115,7 +110,7 @@ Using the official OpenAI Python client.
       }
   )
 
-# Option 2: Hosted  
+## Option 2: Hosted  
   client = OpenAI(
       api_key=os.getenv("OPENAI_API_KEY"),
       base_url="https://dncgateway.com/v1",
@@ -126,7 +121,7 @@ Using the official OpenAI Python client.
 
 ## JavaScript Example
 
-# Option 1: Self-hosted
+## Option 1: Self-hosted
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   baseURL: "http://127.0.0.1:8080/v1",
@@ -135,7 +130,7 @@ const client = new OpenAI({
   }
 });
 
-# Option 2; Hosted
+## Option 2; Hosted
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   baseURL: "https://dncgateway.com/v1",
