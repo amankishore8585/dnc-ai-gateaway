@@ -62,16 +62,17 @@ http://127.0.0.1:8080
 ### 4. Test it(on differnt terminal)
 
 1. Missing API Key (should return 401)
-  
-    curl -i http://127.0.0.1:8080/test
+```bash
+curl -i http://127.0.0.1:8080/test
+```
 
-  Expected:
+Expected:
 
-    -HTTP 401 Unauthorized
+  - HTTP 401 Unauthorized
 
-    -Response includes X-Request-ID
+  - Response includes X-Request-ID
 
-    -Logs show missing_api_key
+  - Logs show missing_api_key
 
 2. Invalid API Key (should return 403)
     
