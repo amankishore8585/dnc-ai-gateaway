@@ -22,6 +22,122 @@ This gateway introduces a control layer in front of AI APIs to solve these probl
 
 It allows developers to safely manage AI API traffic before it reaches the backend.
 
+## Quick Start (Local)
+
+### 1. Clone the repo
+
+git clone https://github.com/yourusername/ai-gateway.git
+cd ai-gateway
+
+### 2. Add API keys
+
+Create a file:
+
+```
+api_keys.json
+```
+
+Example:
+
+```
+{
+  "user1": 2
+}
+```
+
+### 3. Run the gateway
+
+```
+cargo run
+```
+
+Gateway will start on:
+
+```
+http://127.0.0.1:8080
+```
+
+---
+
+### 4. Test it(on differnt terminal)
+
+1. Missing API Key (should return 401)
+  
+    curl -i http://127.0.0.1:8080/test
+
+  Expected:
+
+    -HTTP 401 Unauthorized
+
+    -Response includes X-Request-ID
+
+    -Logs show missing_api_key
+
+2. Invalid API Key (should return 403)
+    
+    curl -i -H "X-API-Key: wrong_key" http://127.0.0.1:8080/test
+
+  Expected:
+
+    -HTTP 403 Forbidden
+
+    -Logs show invalid_api_key    
+
+3. Valid API Key (should succeed)
+    
+    curl -i -H "X-API-Key: user1" http://127.0.0.1:8080/test
+
+  Expected:
+
+    -HTTP 200 OK or Error 502 cause it expects server to run in background.  run a simple server in another 2 other terminals 
+    
+      python3 -m http.server 9002
+    
+      python3 -m http.server 9003
+
+    now retry
+
+    -Request is routed to backend
+
+4. Rate Limiting (should return 429)
+    
+    for i in {1..10}; do
+      curl -s -o /dev/null -w "%{http_code}\n" \
+      -H "X-API-Key: user1" http://127.0.0.1:8080/test
+    done
+
+  Expected:
+
+    Some requests return 429 Too Many Requests 
+    
+    (might need to start local backend at - python3 -m http.server 9002)
+
+    Logs show rate_limited    
+
+5. OpenAI request through gateway:
+
+    curl -i http://127.0.0.1:8080/v1/models \
+    -H "Authorization: Bearer YOUR_OPENAI_API_KEY" \
+    -H "X-API-Key: user1"
+
+  (put your api key after Bearer-sjk***************")
+  
+  Expected:
+
+    - It shows a list of all modes in json format.Meaning its working properly.
+
+    - It might show error due to wrong api key. And you can see the error in ur logs. 
+
+6. Check metrics
+
+```
+curl http://127.0.0.1:8080/metrics
+```
+
+  Expected:
+
+    -List of metrics -total req,failures,rate limited and successful req
+
 
 ## Architecture
 
@@ -97,7 +213,7 @@ X-API-Key
 
 along with their OpenAI request.
 
-## Python Example
+### Python Example
 
 Using the official OpenAI Python client.
 
@@ -119,7 +235,7 @@ Using the official OpenAI Python client.
       }
   )
 
-## JavaScript Example
+### JavaScript Example
 
 ### Option 1: Self-hosted
 const client = new OpenAI({
@@ -194,7 +310,6 @@ const client = new OpenAI({
   - ERROR → upstream/server errors (5xx)
 
 
----
 ## Running
 
 Build the gateway:
