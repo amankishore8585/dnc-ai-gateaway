@@ -13,4 +13,4 @@ Thumbs.db
 
 # editor folders
 .vscode/
-.idea/
+.idea/api_keys.json
