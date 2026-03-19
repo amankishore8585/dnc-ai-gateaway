@@ -48,7 +48,7 @@ Client Application
 
 You can use the gateway in two ways:
 
-1. Self-Hosted (Recommended)
+### 1. Self-Hosted (Recommended)
 
   Run the gateway locally or on your own VPS for full control.
 
@@ -65,7 +65,7 @@ You can use the gateway in two ways:
   -local development and testing
   -no dependency on external services
 
-2. Hosted Gateway (Experimental)
+### 2. Hosted Gateway (Experimental)
 
   You can also use a hosted version of the gateway:
 
@@ -101,7 +101,7 @@ along with their OpenAI request.
 
 Using the official OpenAI Python client.
 
-## Option 1: Self-hosted
+### Option 1: Self-hosted
   client = OpenAI(
       api_key=os.getenv("OPENAI_API_KEY"),
       base_url="http://127.0.0.1:8080/v1",
@@ -110,7 +110,7 @@ Using the official OpenAI Python client.
       }
   )
 
-## Option 2: Hosted  
+### Option 2: Hosted  
   client = OpenAI(
       api_key=os.getenv("OPENAI_API_KEY"),
       base_url="https://dncgateway.com/v1",
@@ -121,7 +121,7 @@ Using the official OpenAI Python client.
 
 ## JavaScript Example
 
-## Option 1: Self-hosted
+### Option 1: Self-hosted
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   baseURL: "http://127.0.0.1:8080/v1",
@@ -130,7 +130,7 @@ const client = new OpenAI({
   }
 });
 
-## Option 2; Hosted
+### Option 2; Hosted
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   baseURL: "https://dncgateway.com/v1",
