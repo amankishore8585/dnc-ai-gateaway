@@ -168,7 +168,7 @@ async fn check_rate_limit(
     false
 }
 
-fn log_request(req: &Request, start: Instant, request_id: &str) {
+fn log_request(req: &Request, start: Instant, request_id: &str,upstream_status: u16,upstream_latency: u128) {
     let duration = start.elapsed();
 
     info!(
@@ -176,8 +176,37 @@ fn log_request(req: &Request, start: Instant, request_id: &str) {
         method = %req.method,
         path = %req.path,
         duration_ms = duration.as_millis(),
+        upstream_status = upstream_status,
+        upstream_latency_ms = upstream_latency,
         "request_completed"
     );
+}
+
+async fn connect_with_retry(addr: String, request_id: &str) -> Option<TcpStream> {
+    for attempt in 1..=2 {
+        match timeout(Duration::from_secs(3), TcpStream::connect(addr.clone())).await {
+            Ok(Ok(stream)) => {
+                if attempt > 1 {
+                    info!(
+                        request_id = %request_id,
+                        upstream = %addr,
+                        attempt = attempt,
+                        "retry_success"
+                    );
+                }
+                return Some(stream);
+            }
+            _ => {
+                warn!(
+                    request_id = %request_id,
+                    upstream = %addr,
+                    attempt = attempt,
+                    "retry_attempt"
+                );
+            }
+        }
+    }
+    None
 }
 
 async fn handle_client(
@@ -191,6 +220,9 @@ async fn handle_client(
     let request_id = Uuid::new_v4().to_string();
     let start = Instant::now();
     
+    let mut upstream_status_code: u16 = 0;
+    let mut upstream_latency_ms: u128 = 0;
+
     info!(
     request_id = %request_id,
     "request_started"
@@ -333,12 +365,9 @@ async fn handle_client(
 
             let host = upstream_addr.split(':').next().unwrap_or("");
 
-            let stream = match timeout(
-                Duration::from_secs(3),
-                TcpStream::connect(upstream_addr.clone())
-            ).await {
-                Ok(Ok(s)) => s,
-                _ => {
+            let stream = match connect_with_retry(upstream_addr.clone(), &request_id).await {
+                Some(s) => s,
+                None => {
                     error!(request_id = %request_id, "upstream_failed");
 
                     send_response(
@@ -373,12 +402,9 @@ async fn handle_client(
 
         } else {
 
-            match timeout(
-                Duration::from_secs(3),
-                TcpStream::connect(upstream_addr.clone())
-            ).await {
-                Ok(Ok(stream)) => Box::new(stream),
-                _ => {
+            let stream = match connect_with_retry(upstream_addr.clone(), &request_id).await {
+                Some(s) => s,
+                None => {
 
                     {
                         let mut map = balancers.lock().unwrap();
@@ -401,9 +427,11 @@ async fn handle_client(
                         start
                     ).await;
                     return;
-                    }
                 }
             };
+
+            Box::new(stream)
+        };    
 
     let mut modified = request.clone();
 
@@ -413,12 +441,15 @@ async fn handle_client(
         modified.replace_range(pos..end, &format!("\r\nHost: {}", host));
     }
 
+    let upstream_start = Instant::now();
 
     upstream.write_all(modified.as_bytes()).await.unwrap();
 
     let mut buffer = [0; 4096];
 
     let n = upstream.read(&mut buffer).await.unwrap_or(0);
+
+    upstream_latency_ms = upstream_start.elapsed().as_millis();
 
     if n > 0 {
         let response_chunk = String::from_utf8_lossy(&buffer[..n]);
@@ -431,6 +462,8 @@ async fn handle_client(
                 .and_then(|s| s.parse::<u16>().ok())
                 .unwrap_or(0);
 
+            upstream_status_code = status_code;
+                
             if status_code >= 500 {
                 error!(
                     request_id = %request_id,
@@ -465,7 +498,7 @@ async fn handle_client(
     let _ = client.shutdown().await;    
 
     //for request log
-    log_request(&req, start, &request_id);
+    log_request(&req, start, &request_id, upstream_status_code,upstream_latency_ms);
 }
 
 async fn health_checker(balancers: Balancers) {

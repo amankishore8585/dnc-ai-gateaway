@@ -26,8 +26,14 @@ It allows developers to safely manage AI API traffic before it reaches the backe
 
 ### 1. Clone the repo
 
-git clone https://github.com/yourusername/ai-gateway.git
+```
+git clone https://github.com/amankishore8585/ai-gateway.git
+```
+go to directory
+
+```
 cd ai-gateway
+```
 
 ### 2. Add API keys
 
