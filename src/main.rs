@@ -442,57 +442,56 @@ async fn handle_client(
     }
 
     let upstream_start = Instant::now();
-
+    // send request
     upstream.write_all(modified.as_bytes()).await.unwrap();
+    upstream.flush().await.unwrap();
+    
 
-    let mut buffer = [0; 4096];
+    // ---- STEP 1: read headers only ----
+    let mut header_buffer = Vec::new();
+    let mut temp = [0u8; 1024];
 
-    let n = upstream.read(&mut buffer).await.unwrap_or(0);
-
-    upstream_latency_ms = upstream_start.elapsed().as_millis();
-
-    if n > 0 {
-        let response_chunk = String::from_utf8_lossy(&buffer[..n]);
-
-        if let Some(line) = response_chunk.lines().next() {
-            // Properly extract status code
-            let status_code = line
-                .split_whitespace()
-                .nth(1)
-                .and_then(|s| s.parse::<u16>().ok())
-                .unwrap_or(0);
-
-            upstream_status_code = status_code;
-                
-            if status_code >= 500 {
-                error!(
-                    request_id = %request_id,
-                    upstream_status = %line,
-                    "upstream_server_error"
-                );
-            } else if status_code >= 400 {
-                warn!(
-                    request_id = %request_id,
-                    upstream_status = %line,
-                    "upstream_client_error"
-                );
-            } else {
-                info!(
-                    request_id = %request_id,
-                    upstream_status = %line,
-                    "upstream_success"
-                );
-            }
+    loop {
+        let n = upstream.read(&mut temp).await.unwrap_or(0);
+        if n == 0 {
+            break;
         }
 
-        // forward first chunk to client
-        let _ = client.write_all(&buffer[..n]).await;
+        header_buffer.extend_from_slice(&temp[..n]);
+
+        if header_buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
+
+    // ---- STEP 2: parse status line ----
+    let header_text = String::from_utf8_lossy(&header_buffer);
+
+    if let Some(line) = header_text.lines().next() {
+        let status_code = line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(0);
+
+        upstream_status_code = status_code;
+
+        if status_code >= 500 {
+            error!(request_id = %request_id, upstream_status = %line, "upstream_server_error");
+        } else if status_code >= 400 {
+            warn!(request_id = %request_id, upstream_status = %line, "upstream_client_error");
+        } else {
+            info!(request_id = %request_id, upstream_status = %line, "upstream_success");
+        }
     }
     
-    // full duplex streaming
-    tokio::io::copy_bidirectional(&mut client, &mut upstream)
-        .await
-        .ok();
+    // ---- STEP 3: send headers to client ----
+    client.write_all(&header_buffer).await.ok();
+    
+    // ---- STEP 4: stream rest of body ----
+    tokio::io::copy(&mut upstream, &mut client).await.ok();
+
+    upstream_latency_ms = upstream_start.elapsed().as_millis();
     
     // close client connection cleanly
     let _ = client.shutdown().await;    
