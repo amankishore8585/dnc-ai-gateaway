@@ -101,10 +101,20 @@ async fn read_request(client: &mut TcpStream) -> Vec<u8> {
 
     
     // ---- STEP 3: read full body ----
-    let mut body = vec![0u8; content_length];
+    let mut body = Vec::new();
+    let mut remaining = content_length;
 
-    if content_length > 0 {
-        client.read_exact(&mut body).await.expect("body read failed");
+    while remaining > 0 {
+        let mut temp = vec![0u8; remaining.min(1024)];
+
+        let n = match client.read(&mut temp).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+
+        body.extend_from_slice(&temp[..n]);
+        remaining -= n;
     }
 
     // ---- STEP 4: combine ----
