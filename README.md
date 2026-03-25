@@ -1,26 +1,110 @@
 # AI Gateway (Rust)
 
-A lightweight AI API gateway that sits between your application and AI providers (such as OpenAI) to control, protect, and observe API usage.
+AI Gateway is a lightweight infra-layer proxy for AI APIs.
+
+Instead of calling OpenAI (or other providers) directly from your app:
+
+App → OpenAI
+
+You route through the gateway:
+
+App → AI Gateway → OpenAI
+
+This lets you enforce policies, track usage, and manage traffic centrally.
 
 ## What Problem This Solves
 
-Modern applications rely heavily on AI APIs, but directly calling them creates serious issues:
+AI APIs introduce new challenges in production:
 
-* **Uncontrolled costs** → API usage can spike unexpectedly
-* **No visibility** → difficult to track who is making requests
-* **No protection** → bots or users can spam your backend
+* API keys exposed across services
+* No centralized rate limiting
+* Hard to track usage & latency
+* No control over traffic routing
+* No visibility into failures
 
-This gateway introduces a control layer in front of AI APIs to solve these problems.
+This gateway solves that at the infrastructure level, not the application level.
 
-## What This Gateway Provides
+## Core Features (v1)
 
-* API key based access control
-* Per-user rate limiting (token bucket)
-* Request logging with unique request IDs
-* Metrics for monitoring usage
-* Routing and load balancing to upstream providers
+### 🔐 API Key Authentication
+* Validate requests using X-API-Key
+* Centralized access control
 
-It allows developers to safely manage AI API traffic before it reaches the backend.
+### 🚦 Rate Limiting (Token Bucket)
+* Per API key + per route
+* Prevent abuse and control costs
+
+### 🧭 Intelligent Routing
+* Route based on path (/v1, /test, etc.)
+* Built-in load balancer support
+
+### 🔁 Connection Retry
+* Retries failed upstream connections
+* Improves resilience under transient failures
+
+### 📊 Observability
+* Request logging with:
+  * request_id
+  * latency
+  * upstream status
+* Structured logs for debugging
+
+### ⚡ Streaming Proxy (Chunked + JSON Safe)
+* Fully supports:
+  * chunked requests
+  * large payloads
+  * streaming responses
+* No buffering → low latency
+
+### 🔐 TLS Support
+* Automatic HTTPS handling for upstream APIs
+
+### ❤️ Health Checking
+* Background health checks for upstream servers
+* Automatically avoids unhealthy backends
+
+## Architecture
+
+The gateway separates:
+
+### Control Plane
+* Auth
+* Rate limiting
+* Routing
+* Logging
+
+### Data Plane
+* Raw TCP streaming
+* Zero-copy forwarding (minimal mutation)
+
+Client Application
+        |
+        v
++------------------+
+|    AI Gateway    |
+|------------------|
+| API Key Auth     |
+| Rate Limiting    |
+| Load Balancer    |
+| Health Checks    |
+| Metrics & Logs   |
++---------+--------+
+          |
+          v
++------------------+
+|   AI Provider    |
+|   (OpenAI API)   |
++------------------+
+
+## Design Philosophy
+
+* Do not modify request bodies
+* Minimize header mutation
+* Stream everything
+* Fail fast, log clearly
+* Stay infra-level, not application-level
+
+This is not a prompt router or model orchestrator.
 
 ## Quick Start (Local)
 
@@ -29,8 +113,6 @@ It allows developers to safely manage AI API traffic before it reaches the backe
 ```
 git clone https://github.com/amankishore8585/ai-gateway.git
 ```
-go to directory
-
 ```
 cd ai-gateway
 ```
@@ -65,7 +147,7 @@ http://127.0.0.1:8080
 
 ---
 
-### 4. Test it(on differnt terminal)
+### 4. Test the Gateway
 
 #### 1. Missing API Key (should return 401)
 ```bash
@@ -100,7 +182,7 @@ Expected:
 
 Expected:
 
-- HTTP 200 OK or Error 502 cause it expects server to run in background.  run a simple server in another 2 other terminals 
+- HTTP 200 OK or you may see a 502 error if no backend server is running. Run a simple server in another 2 other terminals 
 ```bash  
 python3 -m http.server 9002
 ```    
@@ -135,11 +217,11 @@ Expected:
   -H "Authorization: Bearer YOUR_OPENAI_API_KEY" \
   -H "X-API-Key: user1"
 ```
-(put your api key after Bearer-sjk***************")
+(Replace YOUR_OPENAI_API_KEY with your actual key.)
   
 Expected:
 
-- It shows a list of all modes in json format.Meaning its working properly.
+- It shows a list of all models in json format.Meaning its working properly.
 
 - It might show error due to wrong api key. And you can see the error in ur logs. 
 
@@ -152,28 +234,6 @@ curl http://127.0.0.1:8080/metrics
 Expected:
 
 - List of metrics -total req,failures,rate limited and successful req
-
-
-## Architecture
-
-Client Application
-        |
-        v
-+------------------+
-|    AI Gateway    |
-|------------------|
-| API Key Auth     |
-| Rate Limiting    |
-| Load Balancer    |
-| Health Checks    |
-| Metrics & Logs   |
-+---------+--------+
-          |
-          v
-+------------------+
-|   AI Provider    |
-|   (OpenAI API)   |
-+------------------+
 
 ## Using the Gateway
 
@@ -198,15 +258,20 @@ You can use the gateway in two ways:
 
 ### 2. Hosted Gateway (Experimental)
 
-  You can also use a hosted version of the gateway:
+A hosted instance is available for quick testing:
 
-  https://dncgateway.com/v1
+https://dncgateway.com/v1
 
-  ⚠️ Note: This is an early version and not production-ready.
+⚠️ Note:
+This is an experimental deployment intended for evaluation only.
+It is not production-ready and may have limits or downtime.
 
-  Use this option if you want:
-  -quick setup without running infrastructure
-  -simple integration for testing  
+Use this option if you want:
+
+- Quick testing without setup
+- Temporary access for experimentation
+
+For production use, self-hosting is recommended.  
 
 ## Using the Gateway from an Application
 
@@ -214,19 +279,15 @@ Applications can call the gateway instead of calling the OpenAI API directly.
 
 Depending on your setup, this can be:
 
--your local gateway (http://127.0.0.1:8080)
+- your local gateway (http://127.0.0.1:8080)
 
--your own deployed instance
+- your own deployed instance
 
--or the hosted gateway (https://dncgateway.com/v1)
+- or the hosted gateway (https://dncgateway.com/v1)
 
 The gateway forwards requests to the backend AI provider while applying authentication and rate limiting
 
-Clients must include:
-
-X-API-Key
-
-along with their OpenAI request.
+Clients must include the `X-API-Key` header.
 
 ### Python Example
 
@@ -271,123 +332,6 @@ const client = new OpenAI({
 });
 
 
-## Features
-
-* API Key Authentication
-  Requests must include an API key:
-  X-API-Key
-  Keys and limits are configured via api_keys.json.
-
-* Token Bucket Rate Limiting
-  Per-user rate limiting using a token bucket algorithm.
-
-  Example:
-
-  user1 → 2 requests/sec
-  user2 → 10 requests/sec
-
-* Round-Robin Load Balancing
-
-* Automatic Backend Health Checks
-  Backends are periodically checked and automatically marked unhealthy if they fail.
-
-* Metrics Endpoint
-
-  A Prometheus-style metrics endpoint is available:
-
-  /metrics
-
-  Example output:
-
-  requests_total 125
-  auth_failures 10
-  rate_limited 2
-  successful_requests 80
-
-* Logging
-
-  The gateway uses structured logging via `tracing`.
-
-  Each request is assigned a unique `request_id` and logs are emitted for the full request lifecycle.
-
-  Example logs:
-
-  request_started request_id=...
-  incoming_request request_id=... path=/v1/models method=GET
-  routing request_id=... upstream=api.openai.com:443
-  upstream_client_error request_id=... upstream_status=HTTP/1.1 404 Not Found
-  request_completed request_id=... duration_ms=1149
-
-  Log levels:
-
-  - INFO → successful requests
-  - WARN → client errors (4xx)
-  - ERROR → upstream/server errors (5xx)
-
-
-## Running
-
-Build the gateway:
-
-```
-cargo build --release
-```
-
-Run it:
-
-```
-./target/release/ai_gateaway
-```
-
-The gateway will start on:
-
-```
-0.0.0.0:8080
-```
-
----
-
-## Example Request
-
-Basic Request
-```
-curl -H "X-API-Key: user1" http://127.0.0.1:8080/test
-```
-
-OpenAi request through gateway
----
-curl http://127.0.0.1:8080/v1/chat/completions \
--H "Authorization: Bearer OPENAI_API_KEY" \
--H "X-API-Key: user1" \
--H "Content-Type: application/json" \
--d '{
-  "model": "gpt-4o-mini",
-  "messages": [{"role": "user", "content": "hello"}]
-}'
-
-## API Keys
-
-API keys and rate limits are defined in:
-
-```
-api_keys.json
-```
-
-Example:
-
-{
-  "user1": 2,
-  "user2": 10,
-  "premium": 30
-}
-
-Meaning:
-
-user1 → 2 requests/sec
-user2 → 10 requests/sec
-premium → 30 requests/sec
----
-
 ## Metrics
 Metrics endpoint:
 
@@ -419,29 +363,20 @@ Requests/sec: ~60,000
 
 ---
 
-## Project Structure
+## ⚠️ Current Limitations (v1)
 
-```
-src/
- ├── main.rs
- ├── metrics.rs
- ├── rate_limiter.rs
- ├── load_balancer.rs
- └── config.rs
-```
-
----
+* Retry is connection-level only (not full request retry)
+* No request caching
+* No model-level routing
+* No circuit breaker (yet)
 
 ## Future Improvements
-Possible extensions:
 
-improved HTTP parsing
-
-response inspection & analytics
-
-distributed rate limiting
-
-multi-provider routing
+* Config-driven routing (YAML/JSON)
+* Full request retry (idempotent safe)
+* Better upstream status parsing
+* Docker support
+* CLI interface
 
 
 ## License
