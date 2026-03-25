@@ -70,10 +70,11 @@ fn parse_request(request: &str) -> Request {
     }
 }
 
-async fn read_request(client: &mut TcpStream) -> String {
+async fn read_request(client: &mut TcpStream) -> Vec<u8> {
     let mut buffer = Vec::new();
     let mut temp = [0; 1024];
 
+    // ---- STEP 1: read headers ----
     loop {
         let n = client.read(&mut temp).await.expect("read failed");
 
@@ -83,19 +84,33 @@ async fn read_request(client: &mut TcpStream) -> String {
 
         buffer.extend_from_slice(&temp[..n]);
 
-        // limit request size
-        if buffer.len() > 8192 {
-            break;
-        }
-
         if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
             break;
         }
     }
 
-    // 🔥 WAIT A BIT MORE (important)
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    String::from_utf8_lossy(&buffer).to_string()
+    // ---- STEP 2: parse Content-Length ----
+    let headers = String::from_utf8_lossy(&buffer);
+
+    let content_length = headers
+        .lines()
+        .find(|l| l.to_lowercase().starts_with("content-length"))
+        .and_then(|l| l.split(':').nth(1))
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+
+    
+    // ---- STEP 3: read full body ----
+    let mut body = vec![0u8; content_length];
+
+    if content_length > 0 {
+        client.read_exact(&mut body).await.expect("body read failed");
+    }
+
+    // ---- STEP 4: combine ----
+    buffer.extend_from_slice(&body);
+
+    buffer
 }
 
 async fn handle_metrics(req: &Request, client: &mut TcpStream) -> bool {
@@ -229,7 +244,7 @@ async fn handle_client(
     );   
     
     // read request from client
-    let request = match timeout(Duration::from_secs(5), read_request(&mut client)).await {
+    let request_bytes = match timeout(Duration::from_secs(5), read_request(&mut client)).await {
         Ok(req) => req,
         Err(_) => {
             warn!(request_id = %request_id, "request_timeout");
@@ -252,7 +267,8 @@ async fn handle_client(
         .unwrap_or_else(|_| "unknown".to_string());
 
     //parsing
-    let req = parse_request(&request);
+    let request_str = String::from_utf8_lossy(&request_bytes);
+    let req = parse_request(&request_str);
 
     info!(
         request_id = %request_id,
@@ -433,63 +449,63 @@ async fn handle_client(
             Box::new(stream)
         };    
 
-    let mut modified = request.clone();
+    let mut modified = request_bytes.clone();
 
-    if let Some(pos) = modified.find("\r\nHost:") {
-        let end = modified[pos..].find("\r\n").unwrap() + pos;
+    // ---- find end of headers ----
+    if let Some(headers_end) = modified.windows(4).position(|w| w == b"\r\n\r\n") {
+
+        // split headers and body
+        let (headers, body) = modified.split_at(headers_end + 4);
+
+        let headers_str = String::from_utf8_lossy(headers);
+
         let host = upstream_addr.split(':').next().unwrap_or("");
-        modified.replace_range(pos..end, &format!("\r\nHost: {}", host));
+
+        // rebuild headers with correct Host
+        let mut new_headers = String::new();
+
+        for line in headers_str.lines() {
+            if line.to_lowercase().starts_with("host:") {
+                new_headers.push_str(&format!("Host: {}\r\n", host));
+            } else {
+                new_headers.push_str(line);
+                new_headers.push_str("\r\n");
+            }
+        }
+
+        // rebuild full request
+        let mut new_request = new_headers.into_bytes();
+        new_request.extend_from_slice(body);
+
+        modified = new_request;
     }
 
     let upstream_start = Instant::now();
     // send request
-    upstream.write_all(modified.as_bytes()).await.unwrap();
+    upstream.write_all(&modified).await.unwrap();
     upstream.flush().await.unwrap();
     
 
-    // ---- STEP 1: read headers only ----
-    let mut header_buffer = Vec::new();
-    let mut temp = [0u8; 1024];
-
-    loop {
-        let n = upstream.read(&mut temp).await.unwrap_or(0);
-        if n == 0 {
-            break;
+    // stream EVERYTHING directly
+    match tokio::io::copy(&mut upstream, &mut client).await {
+        Ok(_) => {
+            upstream_status_code = 200; // assume success if stream completes
+            info!(
+                request_id = %request_id,
+                upstream_status = 200,
+                "upstream_success"
+            );
         }
-
-        header_buffer.extend_from_slice(&temp[..n]);
-
-        if header_buffer.windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
-        }
-    }
-
-    // ---- STEP 2: parse status line ----
-    let header_text = String::from_utf8_lossy(&header_buffer);
-
-    if let Some(line) = header_text.lines().next() {
-        let status_code = line
-            .split_whitespace()
-            .nth(1)
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(0);
-
-        upstream_status_code = status_code;
-
-        if status_code >= 500 {
-            error!(request_id = %request_id, upstream_status = %line, "upstream_server_error");
-        } else if status_code >= 400 {
-            warn!(request_id = %request_id, upstream_status = %line, "upstream_client_error");
-        } else {
-            info!(request_id = %request_id, upstream_status = %line, "upstream_success");
+        Err(e) => {
+            upstream_status_code = 0;
+            error!(
+                request_id = %request_id,
+                error = %e,
+                "upstream_stream_error"
+            );
         }
     }
-    
-    // ---- STEP 3: send headers to client ----
-    client.write_all(&header_buffer).await.ok();
-    
-    // ---- STEP 4: stream rest of body ----
-    tokio::io::copy(&mut upstream, &mut client).await.ok();
+
 
     upstream_latency_ms = upstream_start.elapsed().as_millis();
     
