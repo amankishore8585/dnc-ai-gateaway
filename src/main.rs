@@ -413,35 +413,31 @@ async fn handle_client(
     // ---- find end of headers ----
     if let Some(headers_end) = modified.windows(4).position(|w| w == b"\r\n\r\n") {
 
-        let (headers, _body) = modified.split_at(headers_end + 4);
+        let mut headers = modified[..headers_end + 4].to_vec();
 
         let host = upstream_addr.split(':').next().unwrap_or("");
 
-        let mut new_headers = Vec::new();
+        // find and replace Host header IN-PLACE
+        if let Some(pos) = headers
+            .windows(6)
+            .position(|w| w.eq_ignore_ascii_case(b"host: "))
+        {
+            // find end of that line
+            if let Some(line_end) = headers[pos..]
+                .windows(2)
+                .position(|w| w == b"\r\n")
+            {
+                let end = pos + line_end;
 
-        // split correctly by CRLF
-        for line in headers.split(|&b| b == b'\n') {
-            let line = if line.ends_with(b"\r") {
-                &line[..line.len() - 1] // remove trailing \r
-            } else {
-                line
-            };
-
-            if line.is_empty() {
-                continue;
-            }
-
-            if line.starts_with(b"Host:") || line.starts_with(b"host:") {
-                new_headers.extend_from_slice(format!("Host: {}\r\n", host).as_bytes());
-            } else {
-                new_headers.extend_from_slice(line);
-                new_headers.extend_from_slice(b"\r\n");
+                // replace Host line
+                headers.splice(
+                    pos..end,
+                    format!("Host: {}", host).as_bytes().iter().cloned()
+                );
             }
         }
-        // end of headers
-        new_headers.extend_from_slice(b"\r\n");
 
-        modified = new_headers;
+        modified = headers;
     }
 
     let upstream_start = Instant::now();
