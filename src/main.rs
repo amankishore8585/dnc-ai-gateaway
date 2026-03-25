@@ -428,9 +428,11 @@ async fn handle_client(
                 new_headers.extend_from_slice(format!("Host: {}\r\n", host).as_bytes());
             } else {
                 new_headers.extend_from_slice(line);
-                new_headers.extend_from_slice(b"\n");
+                new_headers.extend_from_slice(b"\r\n");
             }
         }
+        // ✅ THIS is the important line
+        new_headers.extend_from_slice(b"\r\n");
 
         // rebuild full request
         let new_request = new_headers;
