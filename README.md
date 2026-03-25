@@ -1,6 +1,6 @@
 # AI Gateway (Rust)
 
-AI Gateway is a lightweight infra-layer proxy for AI APIs.
+AI Gateway is a lightweight infra-layer proxy for AI APIs, focused on control, reliability, and observability.
 
 Instead of calling OpenAI (or other providers) directly from your app:
 
