@@ -12,6 +12,8 @@ use config::{ApiKeys, load_api_keys};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+type UsageMap = Arc<Mutex<HashMap<String, u64>>>;
+
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -141,13 +143,24 @@ async fn check_rate_limit(
     false
 }
 
-fn log_request(req: &Request, start: Instant, request_id: &str,upstream_status: u16,upstream_latency: u128) {
+fn log_request(
+    req: &Request,
+    start: Instant,
+    request_id: &str,
+    upstream_status: u16,
+    upstream_latency: u128,
+    api_key: &str,
+    user_id: &str,
+    ) 
+{
     let duration = start.elapsed();
 
     info!(
         request_id = %request_id,
         method = %req.method,
         path = %req.path,
+        api_key = %api_key,  
+        user_id = %user_id, 
         duration_ms = duration.as_millis(),
         upstream_status = upstream_status,
         upstream_latency_ms = upstream_latency,
@@ -186,7 +199,8 @@ async fn handle_client(
     mut client: TcpStream,
     limiter: RateLimiter,
     balancers: Balancers,
-    api_keys: ApiKeys
+    api_keys: ApiKeys,
+    usage_map: UsageMap
     ){
     use uuid::Uuid;
 
@@ -229,6 +243,23 @@ async fn handle_client(
     let request_str = String::from_utf8_lossy(&buffer);
     let req = parse_request(&request_str);
 
+    if req.path == "/stats" && req.method == "GET" {
+        // 🔒 lock only briefly
+        let json = {
+            let map = usage_map.lock().unwrap();
+            serde_json::to_string(&*map).unwrap()
+        }; // ✅ lock is dropped HERE
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            json.len(),
+            json
+        );
+
+        let _ = client.write_all(response.as_bytes()).await;
+        return;
+    }
+
     info!(
         request_id = %request_id,
         path = %req.path,
@@ -261,6 +292,15 @@ async fn handle_client(
         }
     };
 
+    // 👤 USER ID (optional attribution)
+    let user_id = req
+        .headers
+        .get("X-User-Id")
+        .cloned()
+        .unwrap_or_else(|| format!("{}:{}", api_key, ip));
+    
+      
+
     let limit = match api_keys.get(&api_key) {
         Some(l) => *l,
         None => {
@@ -278,6 +318,18 @@ async fn handle_client(
             return;
         }
     };
+
+    // count usage
+    {
+        let mut map = usage_map.lock().unwrap();
+        *map.entry(user_id.clone()).or_insert(0) += 1;
+    }
+    
+    info!(
+        user_id = %user_id,
+        total_requests = %usage_map.lock().unwrap().get(&user_id).unwrap(),
+        "user_usage_updated"
+    );
 
     if check_rate_limit(&api_key, &req.path, limit, &limiter).await {
         warn!(
@@ -479,7 +531,16 @@ async fn handle_client(
     let _ = client.shutdown().await;    
 
     //for request log
-    log_request(&req, start, &request_id, upstream_status_code,upstream_latency_ms);
+    log_request(
+        &req,
+        start,
+        &request_id,
+        upstream_status_code,
+        upstream_latency_ms,
+        &api_key,
+        &user_id,
+    );
+
 }
 
 async fn health_checker(balancers: Balancers) {
@@ -529,6 +590,7 @@ async fn health_checker(balancers: Balancers) {
 #[tokio::main]
 async fn main() {
     init_logging();
+    let usage_map: UsageMap = Arc::new(Mutex::new(HashMap::new()));
 
     let api_keys = load_api_keys();
     
@@ -585,9 +647,10 @@ async fn main() {
                     let api_keys = api_keys.clone();
                     let limiter = limiter.clone();
                     let balancers = balancers.clone();
+                    let usage_map = usage_map.clone();
 
                     async move {
-                        handle_client(stream, limiter, balancers, api_keys).await;
+                        handle_client(stream, limiter, balancers, api_keys, usage_map).await;
                     }
 
                 });
