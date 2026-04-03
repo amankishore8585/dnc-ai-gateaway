@@ -100,7 +100,7 @@ The gateway is structured as a layered infrastructure proxy, separating control,
 Client → AI Gateway → AI Provider
 
 Inside the gateway:
-
+```text
 Incoming Request
       ↓
 Authentication (API Key)
@@ -114,7 +114,7 @@ Upstream Connection (Retry + TLS)
 Streaming Proxy (bidirectional)
       ↓
 Response to Client
-
+```
 ### System View
 ```text
 Client Application
@@ -299,6 +299,7 @@ Expected:
 In the examples above, X-User-Id is included to demonstrate per-user tracking.
 If not provided, the gateway will fall back to:
 <api_key>:<client_ip>
+
 For production usage, it is recommended to pass your application's user ID via X-User-Id.
 
 #### 6. Check metrics
@@ -337,10 +338,10 @@ Example Output
 The AI Gateway sits between your application and AI providers, giving you centralized control over traffic, security, and observability.
 
 Instead of calling OpenAI directly:
-  App → OpenAI
+```App → OpenAI```
 
 Route all requests through the gateway:
-  App → AI Gateway → OpenAI
+```App → AI Gateway → OpenAI```
 
 🧠 Typical Use Case
 Example: Chatbot Startup
@@ -357,19 +358,19 @@ A backend service sending requests to OpenAI can use the gateway to:
 ### 1. Self-Hosted
 
   Run the gateway locally or on your own VPS for full control.
-
+  ```
   cargo build --release
   ./target/release/ai_gateaway
-
+  ```
   The gateway will be available at:
 
   http://127.0.0.1:8080
 
   Use this option if you want:
 
-  -full control over configuration
-  -local development and testing
-  -no dependency on external services
+  - full control over configuration
+  - local development and testing
+  - no dependency on external services
 
 ### 2. Managed Gateway (Early Access)
 
@@ -426,7 +427,7 @@ authenticated_user.id → X-User-Id → AI Gateway
 
 This allows the gateway to track usage per user without requiring any changes in client applications.
 
-👤 User Identification (Important)
+**👤 User Identification (Important)**
 
 The gateway supports per-user tracking using the X-User-Id header.
 
@@ -443,7 +444,7 @@ How this is typically used
 The X-User-Id header is set by your backend service, not by end users.
 Your backend should pass your internal user identifier (e.g. database user ID) to the gateway:
 
-your_app_user_id → X-User-Id → AI Gateway
+```your_app_user_id → X-User-Id → AI Gateway```
 
 This allows the gateway to track usage per user without requiring changes in client applications.
 
@@ -454,7 +455,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   -H "X-API-Key: user1" \
   -H "X-User-Id: user42"
 ```
-Why this matters
+**Why this matters**
 
 Using X-User-Id enables:
 
