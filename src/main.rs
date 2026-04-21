@@ -42,11 +42,13 @@ mod metrics;
 mod rate_limiter;
 mod load_balancer;
 mod config;
+mod db;
 
 use metrics::*;
 use rate_limiter::{RateLimiter, TokenBucket};
 use load_balancer::LoadBalancer;
 use config::{ApiKeys, load_api_keys};
+use crate::db::connect_db;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -62,6 +64,7 @@ type UsageMap = Arc<
     >
 >;
 
+use serde_json::json;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -351,7 +354,8 @@ async fn handle_client(
     limiter: RateLimiter,
     balancers: Balancers,
     api_keys: ApiKeys,
-    usage_map: UsageMap
+    usage_map: UsageMap,
+    db_client: Arc<tokio_postgres::Client>
     ){
     use uuid::Uuid;
 
@@ -477,6 +481,75 @@ async fn handle_client(
 
     //metrics
     if handle_metrics(&req, &mut client).await {
+        return;
+    }
+
+    // ---- STEP 3.1: Handle /stats-db (from PostgreSQL) ----
+    if req.path == "/stats-db" && req.method == "GET" {
+
+        let rows = match db_client.query(
+            "SELECT 
+                user_id,
+                route,
+                model,
+                COUNT(*) as requests,
+                SUM(total_tokens)::BIGINT as total_tokens,
+                SUM(cost)::DOUBLE PRECISION as total_cost,
+                AVG(latency_ms)::DOUBLE PRECISION as avg_latency
+            FROM usage_logs
+            GROUP BY user_id, route, model",
+            &[]
+        ).await {
+            Ok(r) => r,
+            Err(e) => {
+                let body = format!("DB query failed: {}", e);
+                let response = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = client.write_all(response.as_bytes()).await;
+                return;
+            }
+        };
+
+        // Build nested JSON: user → route → model
+        let mut result: HashMap<String, HashMap<String, HashMap<String, serde_json::Value>>> = HashMap::new();
+
+        for row in rows {
+            let user_id: String = row.get("user_id");
+            let route: String = row.get("route");
+            let model: String = row.get("model");
+
+            let requests: i64 = row.get::<_, i64>("requests");
+
+            let total_tokens: i64 = row.get("total_tokens");
+            let total_cost: f64 = row.get("total_cost");
+            let avg_latency: f64 = row.get("avg_latency");
+
+            let user_entry = result.entry(user_id).or_default();
+            let route_entry = user_entry.entry(route).or_default();
+
+            route_entry.insert(
+                model,
+                json!({
+                    "requests": requests,
+                    "total_tokens": total_tokens,
+                    "total_cost": total_cost,
+                    "avg_latency_ms": avg_latency
+                })
+            );
+        }
+
+        let json_body = serde_json::to_string(&result).unwrap();
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            json_body.len(),
+            json_body
+        );
+
+        let _ = client.write_all(response.as_bytes()).await;
         return;
     }
 
@@ -934,6 +1007,13 @@ async fn handle_client(
     
     // ---- STEP 13: Update usage stats ----
     // latency, errors, cost
+
+    // 🔥 calculate cost once (outside block)
+    let (input_price, output_price) = get_model_price(&model);
+
+    let cost =
+        (prompt_tokens as f64 / 1000.0) * input_price +
+        (completion_tokens as f64 / 1000.0) * output_price;
     
     {
         let mut map = usage_map.lock().unwrap();
@@ -953,13 +1033,6 @@ async fn handle_client(
             UPSTREAM_SUCCESS.fetch_add(1, Ordering::Relaxed);
         }
 
-        // 🔥 REAL TOKEN-BASED COST
-        let (input_price, output_price) = get_model_price(&model);
-
-        let cost =
-            (prompt_tokens as f64 / 1000.0) * input_price +
-            (completion_tokens as f64 / 1000.0) * output_price;
-
         model_entry.total_cost += cost;
 
         // 🔥 TOKENS
@@ -970,6 +1043,29 @@ async fn handle_client(
         // 🔥 requests count (IMPORTANT: move it here ideally)
         model_entry.requests += 1;
     }
+
+    // ---- STEP 13.5: Save to DB (async, non-blocking) ----
+    let db = db_client.clone();
+    let user_id_clone = user_id.clone();
+    let route = req.path.clone();
+    let model_clone = model.clone();
+    let cost_copy = cost;
+
+    tokio::spawn(async move {
+        crate::db::insert_usage(
+            &*db,
+            &user_id_clone,
+            &route,
+            &model_clone,
+            prompt_tokens as i64,
+            completion_tokens as i64,
+            total_tokens as i64,
+            // same cost you calculated above
+            cost_copy,
+            upstream_latency_ms as i64,
+            upstream_status_code as i32,
+        ).await;
+    });
 
     // ---- STEP 14: Final request log ----
     log_request(
@@ -1038,7 +1134,8 @@ async fn main() {
     let limiter: RateLimiter = Arc::new(Mutex::new(HashMap::new()));
 
     let balancers: Balancers = Arc::new(Mutex::new(HashMap::new()));
-
+    
+    let db_client = Arc::new(connect_db().await);
 
     // start background health checker
     {
@@ -1089,9 +1186,10 @@ async fn main() {
                     let limiter = limiter.clone();
                     let balancers = balancers.clone();
                     let usage_map = usage_map.clone();
+                    let db_client = db_client.clone(); 
 
                     async move {
-                        handle_client(stream, limiter, balancers, api_keys, usage_map).await;
+                        handle_client(stream, limiter, balancers, api_keys, usage_map, db_client).await;
                     }
 
                 });

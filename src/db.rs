@@ -18,12 +18,31 @@ pub async fn connect_db() -> Client {
 
 pub async fn insert_usage(
     client: &Client,
-    api_key: &str,
-    endpoint: &str,
-    latency: i64,
+    user_id: &str,
+    route: &str,
+    model: &str,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
+    cost: f64,
+    latency_ms: i64,
+    status_code: i32,
 ) {
     let _ = client.execute(
-        "INSERT INTO usage_records (api_key, endpoint, latency_ms) VALUES ($1, $2, $3)",
-        &[&api_key, &endpoint, &latency],
+        "INSERT INTO usage_logs 
+        (user_id, route, model, prompt_tokens, completion_tokens, total_tokens, cost, latency_ms, status_code)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+        &[
+            &user_id,
+            &route,
+            &model,
+            &prompt_tokens,
+            &completion_tokens,
+            &total_tokens,
+            &cost,
+            &latency_ms,
+            &status_code,
+        ],
     ).await;
 }
+
