@@ -365,6 +365,8 @@ async fn handle_client(
     let upstream_status_code: u16;
     let upstream_latency_ms: u128;
 
+    let DAILY_LIMIT: f64 = 0.01; // example: $0.01
+
     info!(
     request_id = %request_id,
     "request_started"
@@ -485,9 +487,38 @@ async fn handle_client(
     }
 
     // ---- STEP 3.1: Handle /stats-db (from PostgreSQL) ----
-    if req.path == "/stats-db" && req.method == "GET" {
+    if req.path.starts_with("/stats-db") && req.method == "GET" {
 
-        let rows = match db_client.query(
+        // ---- Parse query params ----
+        let mut user_filter: Option<String> = None;
+        let mut range_filter = "1 day".to_string(); // default
+
+        if let Some(pos) = req.path.find('?') {
+            let query_str = &req.path[pos + 1..];
+
+            for pair in query_str.split('&') {
+                let mut kv = pair.split('=');
+                let key = kv.next().unwrap_or("");
+                let val = kv.next().unwrap_or("");
+
+                match key {
+                    "user" => user_filter = Some(val.to_string()),
+                    "range" => {
+                        if val == "24h" {
+                            range_filter = "1 day".to_string();
+                        } else if val == "7d" {
+                            range_filter = "7 days".to_string();
+                        } else if val == "all" {
+                            range_filter = "all".to_string();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // ---- Build dynamic SQL query ----
+        let mut query = String::from(
             "SELECT 
                 user_id,
                 route,
@@ -496,10 +527,31 @@ async fn handle_client(
                 SUM(total_tokens)::BIGINT as total_tokens,
                 SUM(cost)::DOUBLE PRECISION as total_cost,
                 AVG(latency_ms)::DOUBLE PRECISION as avg_latency
-            FROM usage_logs
-            GROUP BY user_id, route, model",
-            &[]
-        ).await {
+            FROM usage_logs"
+        
+        );
+
+        // 👉 ONLY add WHERE if not "all"
+        if range_filter != "all" {
+            query.push_str(" WHERE created_at > NOW() - INTERVAL '");
+            query.push_str(&range_filter);
+            query.push_str("'");
+
+            if user_filter.is_some() {
+                query.push_str(" AND user_id = $1");
+            }
+        } else if user_filter.is_some() {
+            query.push_str(" WHERE user_id = $1");
+        }
+
+        query.push_str(" GROUP BY user_id, route, model");
+
+        // ---- Execute query ----
+        let rows = match if let Some(user) = &user_filter {
+            db_client.query(&query, &[user]).await
+        } else {
+            db_client.query(&query, &[]).await
+        } {
             Ok(r) => r,
             Err(e) => {
                 let body = format!("DB query failed: {}", e);
@@ -640,6 +692,37 @@ async fn handle_client(
         return;
     }
     GATEWAY_ACCEPTED.fetch_add(1, Ordering::Relaxed);
+
+    // ---- STEP 6.5: Enforce daily cost limit ----
+
+    let rows = db_client.query(
+        "SELECT COALESCE(SUM(cost), 0)
+        FROM usage_logs
+        WHERE user_id = $1
+        AND created_at > NOW() - INTERVAL '1 day'",
+        &[&user_id]
+    ).await;
+
+    let current_cost: f64 = match rows {
+        Ok(r) => {
+            let val: f64 = r[0].get(0);
+            val
+        }
+        Err(_) => 0.0,
+    };
+
+    if current_cost >= DAILY_LIMIT {
+        let body = format!("Daily limit exceeded. Used: ${:.6}", current_cost);
+
+        let response = format!(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let _ = client.write_all(response.as_bytes()).await;
+        return;
+    }
 
     // ---- STEP 7: Route request to upstream ----
     let upstream_addr = {
