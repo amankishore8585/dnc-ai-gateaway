@@ -77,6 +77,8 @@ use tokio_native_tls::TlsConnector;
 use native_tls::TlsConnector as NativeTlsConnector;
 use tracing::{info, warn, error};
 
+use sha2::{Sha256, Digest};
+
 trait IoStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> IoStream for T {}
 
@@ -331,6 +333,47 @@ fn extract_model_from_body(buffer: &[u8]) -> String {
     "unknown".to_string()
 }
 
+fn generate_cache_key(model: &str, body: &str) -> String {
+    let input = format!("{}:{}", model, body);
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn extract_and_normalize_prompt(body: &str) -> String {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+
+        // OpenAI format: messages[...].content
+        if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
+            
+            let mut combined = String::new();
+
+            for msg in messages {
+                if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
+                    combined.push_str(content);
+                    combined.push(' ');
+                }
+            }
+
+            return normalize_text(&combined);
+        }
+
+        // fallback (your simpler case)
+        if let Some(msg) = json.get("message").and_then(|m| m.as_str()) {
+            return normalize_text(msg);
+        }
+    }
+
+    "".to_string()
+}
+
+fn normalize_text(input: &str) -> String {
+    input
+        .to_lowercase()
+        .trim()
+        .replace(".", "")
+        .replace(",", "")
+}
 
 // ============================================================
 // MAIN REQUEST HANDLER (CORE LOGIC)
@@ -403,6 +446,7 @@ async fn handle_client(
     let request_str = String::from_utf8_lossy(&buffer);
     let req = parse_request(&request_str);
 
+    // Detect Ai request + model
     let should_parse = req.path.contains("/chat/completions");
 
     let model = if req.path.contains("/chat/completions") {
@@ -410,6 +454,9 @@ async fn handle_client(
     } else {
         "unknown".to_string()
     };
+
+    let mut body_str = String::new();
+    let mut cache_key = String::new(); 
 
     // ---- STEP 3: Handle /stats endpoint ----
     // Returns aggregated usage data
@@ -628,13 +675,27 @@ async fn handle_client(
         }
     };
 
+    let app_id = req
+        .headers
+        .get("X-App-Id")
+        .cloned()
+        .unwrap_or_else(|| "default".to_string());
+    
+    if req.headers.get("X-App-Id").is_none() {
+        warn!(
+            request_id = %request_id,
+            "missing_app_id_using_default"
+        );
+    }   
+
     // 👤 USER ID (optional attribution)
-    let user_id = req
+    let base_user = req
         .headers
         .get("X-User-Id")
         .cloned()
         .unwrap_or_else(|| format!("{}:{}", api_key, ip));
-    
+
+    let user_id = format!("{}:{}", base_user, app_id);
       
 
     let limit = match api_keys.get(&api_key) {
@@ -869,23 +930,15 @@ async fn handle_client(
         modified = headers;
     }
 
-    let upstream_start = Instant::now();
-    // send request
-    upstream.write_all(&modified).await.unwrap();
-    upstream.flush().await.unwrap();
-
-    // 🔥 send any body bytes that were already read
-    let header_end = buffer.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
-
-    if buffer.len() > header_end {
-        let already_read_body = &buffer[header_end..];
-        upstream.write_all(already_read_body).await.unwrap();
-    }
-
     // ---- STEP 10: Read upstream response ----
     // Handles:
     // - chunked encoding
     // - content-length fallback
+
+    let header_end = buffer
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap() + 4;
     
     let content_length = req
         .headers
@@ -903,8 +956,66 @@ async fn handle_client(
         if let Err(e) = client.read_exact(&mut remaining_buf).await {
             error!(request_id = %request_id, error = %e, "body_read_failed");
         }
+        // ✅ IMPORTANT: add this line
+        buffer.extend_from_slice(&remaining_buf);
 
-        upstream.write_all(&remaining_buf).await.unwrap();
+        //upstream.write_all(&remaining_buf).await.unwrap();
+    }
+
+    // ---- Generate FULL body + cache key (after full read) ----
+    if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+        body_str = String::from_utf8_lossy(&buffer[pos + 4..]).to_string();
+    }
+
+    let normalized_prompt = extract_and_normalize_prompt(&body_str);
+    cache_key = generate_cache_key(&model, &normalized_prompt);
+
+    info!("should_parse: {}", should_parse);
+    info!("normalized_prompt: [{}]", normalized_prompt);
+    info!("model: {}", model);
+    info!("cache_key: {}", cache_key);
+
+    // ---- CACHE CHECK ----
+    if should_parse && !normalized_prompt.is_empty() && model != "unknown" {
+
+        let cached = db_client.query(
+            "SELECT response FROM prompt_cache 
+            WHERE cache_key = $1", 
+            &[&cache_key]
+        ).await;
+
+        if let Ok(rows) = cached {
+            if !rows.is_empty() {
+
+                let cached_response: Vec<u8> = rows[0].get(0);
+                let _ = client.write_all(&cached_response).await;
+
+                info!(
+                    request_id = %request_id,
+                    "cache_hit"
+                );
+
+                crate::db::insert_cache_hit(
+                    &db_client,
+                    &user_id,
+                    &req.path,
+                    &model,
+                ).await;
+
+                return;
+            }
+        }
+    }
+
+    let upstream_start = Instant::now();
+    // send request
+    upstream.write_all(&modified).await.unwrap();
+    upstream.flush().await.unwrap();
+
+
+    if buffer.len() > header_end {
+        let already_read_body = &buffer[header_end..];
+        upstream.write_all(already_read_body).await.unwrap();
     }
 
     let mut prompt_tokens: u64 = 0;
@@ -1066,6 +1177,23 @@ async fn handle_client(
 
         // 🚨 send EXACT same bytes (do not modify)
         let _ = client.write_all(&response_buffer).await;
+
+        // ---- CACHE STORE ----
+        if should_parse && !body_str.is_empty() && model != "unknown" {
+
+            let db = db_client.clone();
+            let cache_key_clone = cache_key.clone();
+            let response_bytes = response_buffer.clone();
+
+            tokio::spawn(async move {
+                let _ = db.execute(
+                    "INSERT INTO prompt_cache (cache_key, response) 
+                    VALUES ($1, $2)
+                    ON CONFLICT (cache_key) DO NOTHING",
+                    &[&cache_key_clone, &response_bytes]
+                ).await;
+            });
+        }
 
         upstream_status_code = 200;
 

@@ -46,3 +46,20 @@ pub async fn insert_usage(
     ).await;
 }
 
+pub async fn insert_cache_hit(
+    client: &Client,
+    user_id: &str,
+    route: &str,
+    model: &str,
+) {
+    let _ = client.execute(
+        "INSERT INTO usage_logs 
+        (user_id, route, model, prompt_tokens, completion_tokens, total_tokens, cost, latency_ms, status_code)
+        VALUES ($1,$2,$3,0,0,0,0,0,200)",
+        &[
+            &user_id,
+            &route,
+            &model,
+        ],
+    ).await;
+}

@@ -1,0 +1,109 @@
+if let Ok(rows) = cached {
+            if !rows.is_empty() {
+                let cached_response: Vec<u8> = rows[0].get(0);
+                let _ = client.write_all(&cached_response).await;
+
+                info!(
+                    request_id = %request_id,
+                    "cache_hit"
+                );
+
+                return;
+            }
+        }
+
+
+
+     modified = headers;
+    }
+
+    let upstream_start = Instant::now();
+    // send request
+    upstream.write_all(&modified).await.unwrap();
+    upstream.flush().await.unwrap();
+
+    // 🔥 send any body bytes that were already read
+    let header_end = buffer.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+
+    if buffer.len() > header_end {
+        let already_read_body = &buffer[header_end..];
+        upstream.write_all(already_read_body).await.unwrap();
+    }
+
+    // ---- STEP 10: Read upstream response ----
+    // Handles:
+    // - chunked encoding
+    // - content-length fallback
+    
+    let content_length = req
+        .headers
+        .get("Content-Length")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    let already_read = buffer.len() - header_end;
+
+    let remaining = content_length.saturating_sub(already_read);
+
+    if remaining > 0 {
+        let mut remaining_buf = vec![0u8; remaining];
+
+        if let Err(e) = client.read_exact(&mut remaining_buf).await {
+            error!(request_id = %request_id, error = %e, "body_read_failed");
+        }
+        // ✅ IMPORTANT: add this line
+        buffer.extend_from_slice(&remaining_buf);
+
+        upstream.write_all(&remaining_buf).await.unwrap();
+    }
+
+    // ---- Generate FULL body + cache key (after full read) ----
+    if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+        body_str = String::from_utf8_lossy(&buffer[pos + 4..]).to_string();
+    }
+
+    let normalized_prompt = extract_and_normalize_prompt(&body_str);
+    cache_key = generate_cache_key(&model, &normalized_prompt);
+
+    info!("should_parse: {}", should_parse);
+    info!("normalized_prompt: [{}]", normalized_prompt);
+    info!("model: {}", model);
+    info!("cache_key: {}", cache_key);
+
+    // ---- CACHE CHECK ----
+    if should_parse && !normalized_prompt.is_empty() && model != "unknown" {
+
+        let cached = db_client.query(
+            "SELECT response FROM prompt_cache 
+            WHERE cache_key = $1 
+            AND created_at > NOW() - INTERVAL '1 hour'",
+            &[&cache_key]
+        ).await;
+
+        if let Ok(rows) = cached {
+            if !rows.is_empty() {
+
+                let cached_response: Vec<u8> = rows[0].get(0);
+                let _ = client.write_all(&cached_response).await;
+
+                info!(
+                    request_id = %request_id,
+                    "cache_hit"
+                );
+
+                return;
+            }
+        }
+    }
+
+    let mut prompt_tokens: u64 = 0;
+    let mut completion_tokens: u64 = 0;
+    let mut total_tokens: u64 = 0;
+
+
+
+
+
+
+
+AND created_at > NOW() - INTERVAL '1 hour'",
