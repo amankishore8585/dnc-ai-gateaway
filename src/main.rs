@@ -95,10 +95,12 @@ type Balancers = Arc<Mutex<HashMap<String, LoadBalancer>>>;
 // - Currently not fully wired into stats
 // ------------------------------------------------------------
 fn get_model_price(model: &str) -> (f64, f64) {
-    match model {
-        "gpt-4o-mini" => (0.00015, 0.0006),
-        "gpt-4o" => (0.005, 0.015),
-        _ => (0.0, 0.0), // unknown model
+    if model.starts_with("gpt-4o-mini") {
+        (0.00015, 0.0006)
+    } else if model.starts_with("gpt-4o") {
+        (0.005, 0.015)
+    } else {
+        (0.0, 0.0)
     }
 }
 
@@ -919,6 +921,7 @@ async fn handle_client(
 
     let mut modified = buffer.clone();
 
+
     // ---- STEP 9: Forward request to upstream ----
     // Fix Host header + send body
     if let Some(headers_end) = modified.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -948,6 +951,21 @@ async fn handle_client(
         }
 
         modified = headers;
+
+        // 🔥 ADD THIS RIGHT HERE (IMPORTANT)
+        // REMOVE Accept-Encoding to prevent gzip
+        if let Some(pos) = modified
+            .windows(18)
+            .position(|w| w.eq_ignore_ascii_case(b"accept-encoding: "))
+        {
+            if let Some(line_end) = modified[pos..]
+                .windows(2)
+                .position(|w| w == b"\r\n")
+            {
+                let end = pos + line_end + 2;
+                modified.drain(pos..end);
+            }
+        }
     }
 
     // ---- STEP 10: Read upstream response ----
