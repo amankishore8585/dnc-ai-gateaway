@@ -449,7 +449,7 @@ async fn handle_client(
     // Detect Ai request + model
     let should_parse = req.path.contains("/chat/completions");
 
-    let model = if req.path.contains("/chat/completions") {
+    let mut model = if req.path.contains("/chat/completions") {
         extract_model_from_body(&buffer)
     } else {
         "unknown".to_string()
@@ -991,7 +991,7 @@ async fn handle_client(
     cache_key = generate_cache_key(&model, &normalized_prompt);
 
     info!("should_parse: {}", should_parse);
-    info!("normalized_prompt: [{}]", normalized_prompt);
+    info!("prompt_received len={}", normalized_prompt.len());
     info!("model: {}", model);
     info!("cache_key: {}", cache_key);
 
@@ -1144,7 +1144,7 @@ async fn handle_client(
                 let body_str = cleaned;
 
                 // 🔥 DEBUG
-                println!("BODY DEBUG:\n{}\n----END----", body_str);
+                //println!("BODY DEBUG:\n{}\n----END----", body_str);
 
                 // 🔥 extract JSON safely
                 if let Some(start) = body_str.find('{') {
@@ -1153,9 +1153,14 @@ async fn handle_client(
                     let json_str = &body_str[start..=end];
                     let json_str = json_str.trim();
 
-                    println!("EXTRACTED JSON:\n{}\n----END JSON----", json_str);
+                    //println!("EXTRACTED JSON:\n{}\n----END JSON----", json_str);
 
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        
+                        // ✅ FIX: extract model from response
+                        if let Some(m) = json.get("model").and_then(|v| v.as_str()) {
+                            model = m.to_string();
+                        }
 
                         if let Some(usage) = json.get("usage") {
 
