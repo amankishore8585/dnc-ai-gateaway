@@ -79,6 +79,9 @@ use tracing::{info, warn, error};
 
 use sha2::{Sha256, Digest};
 
+use flate2::read::GzDecoder;
+use std::io::Read;
+
 trait IoStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> IoStream for T {}
 
@@ -952,20 +955,6 @@ async fn handle_client(
 
         modified = headers;
 
-        // 🔥 ADD THIS RIGHT HERE (IMPORTANT)
-        // REMOVE Accept-Encoding to prevent gzip
-        if let Some(pos) = modified
-            .windows(18)
-            .position(|w| w.eq_ignore_ascii_case(b"accept-encoding: "))
-        {
-            if let Some(line_end) = modified[pos..]
-                .windows(2)
-                .position(|w| w == b"\r\n")
-            {
-                let end = pos + line_end + 2;
-                modified.drain(pos..end);
-            }
-        }
     }
 
     // ---- STEP 10: Read upstream response ----
@@ -1079,7 +1068,7 @@ async fn handle_client(
             }
         }
 
-        let headers_str = String::from_utf8_lossy(&response_buffer);
+        let headers_str = String::from_utf8_lossy(&response_buffer).to_string();
 
         // 🔥 detect chunked encoding
         let is_chunked = headers_str
@@ -1139,14 +1128,38 @@ async fn handle_client(
         // ---- STEP 11: Parse OpenAI response ----
         // Extract token usage from JSON
         // (only for /chat/completions)
-        
+        // ---- STEP 11: Parse OpenAI response ----
+        println!("HEADERS:\n{}", headers_str);
+
+        let is_gzip = headers_str
+            .lines()
+            .any(|l| l.to_lowercase().starts_with("content-encoding: gzip"));
+
+        println!("IS GZIP: {}", is_gzip);
+
         if let Some(split_pos) = response_buffer
             .windows(4)
             .position(|w| w == b"\r\n\r\n")
         {
             let body = &response_buffer[split_pos + 4..];
 
-            if let Ok(body_str_raw) = std::str::from_utf8(body) {
+            let body_bytes = if is_gzip {
+                let mut d = GzDecoder::new(body);
+                let mut decompressed = Vec::new();
+
+                match d.read_to_end(&mut decompressed) {
+                    Ok(_) => decompressed,
+                    Err(e) => {
+                        println!("GZIP DECODE FAILED: {:?}", e);
+                        println!("RAW BODY SIZE: {}", body.len());
+                        Vec::new()
+                    }
+                }
+            } else {
+                body.to_vec()
+            };
+
+            if let Ok(body_str_raw) = std::str::from_utf8(&body_bytes) {
 
                 // 🔥 CLEAN CHUNKED GARBAGE (hex chunk sizes like 1b, 32c, 0)
                 let cleaned: String = body_str_raw
