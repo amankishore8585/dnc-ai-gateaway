@@ -994,6 +994,9 @@ async fn handle_client(
         body_str = String::from_utf8_lossy(&buffer[pos + 4..]).to_string();
     }
 
+    // 🔥 ADD THIS LINE
+    model = extract_model_from_body(&buffer);
+    
     let normalized_prompt = extract_and_normalize_prompt(&body_str);
     cache_key = generate_cache_key(&model, &normalized_prompt);
 
