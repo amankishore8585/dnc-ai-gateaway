@@ -380,21 +380,39 @@ fn normalize_text(input: &str) -> String {
         .replace(",", "")
 }
 
+fn normalize_model(model: &str) -> String {
+    // remove version suffix like -2024-07-18
+    let parts: Vec<&str> = model.split('-').collect();
+
+    if parts.len() >= 3 {
+        format!("{}-{}-{}", parts[0], parts[1], parts[2])
+    } else {
+        model.to_string()
+    }
+}
+
 // ============================================================
 // MAIN REQUEST HANDLER (CORE LOGIC)
 // ------------------------------------------------------------
 // Handles full lifecycle:
 //
-// 1. Read request
+// 1. Read Incoming request
 // 2. Parse HTTP
-// 3. Authenticate
-// 4. Rate limit
-// 5. Route request
-// 6. Forward to upstream
-// 7. Read response
-// 8. Extract token usage (if OpenAI)
-// 9. Send response back
-// 10. Update stats + logs
+// 3. Handle Internaal Routes
+// 4. Auth + Identity
+// 5. Rate Limit + Cost Control
+// 6. Route to upstream
+// 7. Connect to Upstream
+// 8. Fix / Rewrite Headers
+// 9. Reconstruct + Normalize Request (CRITICAL)
+// 10. Cache Layer
+// 11. Forward Request
+// 12. Read Response Headers
+// 13. Read + Normalize Response Body
+// 14. Decode + Parse
+// 15. Send Response Back
+// 16. Cache Store
+// 17. Metrics + Logging
 // ============================================================
 
 async fn handle_client(
@@ -741,7 +759,7 @@ async fn handle_client(
         }
     };
 
-    // ---- STEP 5: Track request count ----
+    // ---- STEP 4.5: Track request count ----
     
     let total_requests = {
         let map = usage_map.lock().unwrap();
@@ -759,7 +777,7 @@ async fn handle_client(
         total_requests = %total_requests,
         "user_usage_updated"
     );
-    // ---- STEP 6: Rate limiting ----
+    // ---- STEP 5: Rate limiting ----
 
     if check_rate_limit(&api_key, &req.path, limit, &limiter).await {
         warn!(
@@ -779,7 +797,7 @@ async fn handle_client(
     }
     GATEWAY_ACCEPTED.fetch_add(1, Ordering::Relaxed);
 
-    // ---- STEP 6.5: Enforce daily cost limit ----
+    // ---- STEP 5.5: Enforce daily cost limit ----
 
     let rows = db_client.query(
         "SELECT COALESCE(SUM(cost), 0)
@@ -810,7 +828,7 @@ async fn handle_client(
         return;
     }
 
-    // ---- STEP 7: Route request to upstream ----
+    // ---- STEP 6: Route request to upstream ----
     let upstream_addr = {
         let mut map = balancers.lock().unwrap();
 
@@ -847,7 +865,7 @@ async fn handle_client(
         "routing"
     );
 
-    // ---- STEP 8: Connect to upstream (TLS or TCP) ----
+    // ---- STEP 7: Connect to upstream (TLS or TCP) ----
 
     let mut upstream: Box<dyn IoStream> =
         if upstream_addr.ends_with(":443") {
@@ -925,7 +943,7 @@ async fn handle_client(
     let mut modified = buffer.clone();
 
 
-    // ---- STEP 9: Forward request to upstream ----
+    // ---- STEP 8: Forward request to upstream ----
     // Fix Host header + send body
     if let Some(headers_end) = modified.windows(4).position(|w| w == b"\r\n\r\n") {
 
@@ -957,47 +975,59 @@ async fn handle_client(
 
     }
 
-    // ---- STEP 10: Read upstream response ----
-    // Handles:
-    // - chunked encoding
-    // - content-length fallback
+    // ============================================================
+    // ---- STEP 9: Ensure FULL client request body is read
+    // ============================================================
+    // Goal:
+    // - Read complete request from client
+    // - Handle partial body reads (Content-Length based)
 
     let header_end = buffer
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
         .unwrap() + 4;
-    
+    // Extract Content-Length from request headers
     let content_length = req
         .headers
         .get("Content-Length")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
-
+    // Calculate how much body we already have
     let already_read = buffer.len() - header_end;
 
     let remaining = content_length.saturating_sub(already_read);
-
+    // ---- STEP 9.1: Read remaining body (if incomplete)
     if remaining > 0 {
         let mut remaining_buf = vec![0u8; remaining];
 
         if let Err(e) = client.read_exact(&mut remaining_buf).await {
             error!(request_id = %request_id, error = %e, "body_read_failed");
         }
-        // ✅ IMPORTANT: add this line
+        // Append remaining body to buffer
         buffer.extend_from_slice(&remaining_buf);
 
-        //upstream.write_all(&remaining_buf).await.unwrap();
     }
 
-    // ---- Generate FULL body + cache key (after full read) ----
+    // ============================================================
+    // ---- STEP 9.2: Extract FULL request body (for parsing)
+    // ============================================================
     if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
         body_str = String::from_utf8_lossy(&buffer[pos + 4..]).to_string();
     }
 
-    // 🔥 ADD THIS LINE
+    // ============================================================
+    // ---- STEP 9.3: Extract model + normalize prompt
+    // ============================================================
+
+    // IMPORTANT: Must run AFTER full body is read
     model = extract_model_from_body(&buffer);
+
+    // 🔥 ADD THIS LINE
+    model = normalize_model(&model);
     
+    // Normalize prompt (for cache consistency)
     let normalized_prompt = extract_and_normalize_prompt(&body_str);
+    // Generate deterministic cache key
     cache_key = generate_cache_key(&model, &normalized_prompt);
 
     info!("should_parse: {}", should_parse);
@@ -1005,7 +1035,14 @@ async fn handle_client(
     info!("model: {}", model);
     info!("cache_key: {}", cache_key);
 
-    // ---- CACHE CHECK ----
+    // ============================================================
+    // ---- STEP 10: Cache lookup (read path)
+    // ============================================================
+    // Conditions:
+    // - parsing enabled
+    // - prompt not empty
+    // - model successfully extracted
+    
     if should_parse && !normalized_prompt.is_empty() && model != "unknown" {
 
         let cached = db_client.query(
@@ -1036,28 +1073,35 @@ async fn handle_client(
             }
         }
     }
+    // ============================================================
+    // ---- STEP 11: Forward request to upstream (OpenAI)
+    // ============================================================
 
     let upstream_start = Instant::now();
-    // send request
+    // Send headers + modified request
     upstream.write_all(&modified).await.unwrap();
     upstream.flush().await.unwrap();
 
-
+    // ---- STEP : Forward already-read body (if any)
     if buffer.len() > header_end {
         let already_read_body = &buffer[header_end..];
         upstream.write_all(already_read_body).await.unwrap();
     }
-
+    // ---- STEP : Initialize usage tracking
     let mut prompt_tokens: u64 = 0;
     let mut completion_tokens: u64 = 0;
     let mut total_tokens: u64 = 0;
 
     if should_parse {
-
+    // ============================================================
+    // ---- STEP 12.A: Read upstream response headers (OpenAI → us)
+    // ============================================================
+        
         let mut response_buffer = Vec::new();
         let mut temp = [0u8; 1024];
 
-        // 🔥 STEP 1: read response headers first
+        
+        // Read until we hit end of headers (\r\n\r\n)
         loop {
             let n = upstream.read(&mut temp).await.unwrap();
             if n == 0 {
@@ -1066,25 +1110,37 @@ async fn handle_client(
 
             response_buffer.extend_from_slice(&temp[..n]);
 
+            // Stop once headers are fully received
             if response_buffer.windows(4).any(|w| w == b"\r\n\r\n") {
                 break;
             }
         }
-
+        
+        // Convert headers to string for inspection
         let headers_str = String::from_utf8_lossy(&response_buffer).to_string();
 
-        // 🔥 detect chunked encoding
+        // ============================================================
+        // ---- STEP 12B: Detect response encoding type
+        // ============================================================
+        
+        // check if response uses chunked transfer encoding
         let is_chunked = headers_str
             .to_lowercase()
             .contains("transfer-encoding: chunked");
-
+        // Find where headers end
         let header_end = response_buffer
             .windows(4)
             .position(|w| w == b"\r\n\r\n")
             .unwrap() + 4;
 
+        // ============================================================
+        // ---- STEP 13.A: Read FULL body (handle chunked vs normal)
+        // ============================================================    
         if is_chunked {
 
+            // --------------------------------------------
+            // STEP 13.1: Read full chunked body
+            // --------------------------------------------
             let mut body = response_buffer[header_end..].to_vec();
 
             loop {
@@ -1102,7 +1158,14 @@ async fn handle_client(
                 }
             }
 
-            // 🔥 SIMPLE FIX: remove chunk size lines (but KEEP binary safe)
+            // --------------------------------------------
+            // STEP 13.2: Dechunk (remove chunk metadata)
+            // --------------------------------------------
+            // Input format:
+            // [size]\r\n[data]\r\n[size]\r\n[data]...
+            // Output:
+            // pure data only
+
             let mut cleaned = Vec::new();
             let mut i = 0;
 
@@ -1112,21 +1175,22 @@ async fn handle_client(
                 while j + 1 < body.len() && !(body[j] == b'\r' && body[j + 1] == b'\n') {
                     j += 1;
                 }
-
+                // Safety: incomplete chunk header
                 if j + 1 >= body.len() {
                     break;
                 }
 
-                // parse chunk size
+                // ---- Parse chunk size (hex → usize) ----
                 let size_str = String::from_utf8_lossy(&body[i..j]);
                 let size = usize::from_str_radix(size_str.trim(), 16).unwrap_or(0);
 
                 if size == 0 {
                     break;
-                }
+                }// size = 0 → end of stream
 
                 i = j + 2; // skip \r\n
-
+                
+                // Safety: avoid overflow
                 if i + size > body.len() {
                     break;
                 }
@@ -1134,11 +1198,13 @@ async fn handle_client(
                 cleaned.extend_from_slice(&body[i..i + size]);
 
                 i += size + 2; // skip data + \r\n
-                }
+            }
 
             println!("CLEANED SIZE: {}", cleaned.len());
 
-            // fallback safety
+            // --------------------------------------------
+            // STEP 13.3: Replace raw chunked body with clean body
+            // --------------------------------------------
             if cleaned.len() > 0 {
                 response_buffer.truncate(header_end);
                 response_buffer.extend_from_slice(&cleaned);
@@ -1146,7 +1212,10 @@ async fn handle_client(
                 println!("DECHUNK FAILED — USING RAW BODY");
             }
 
-            // 🔥 FIX: update headers after dechunking
+            // --------------------------------------------
+            // STEP 13.4: FIX HEADERS (CRITICAL)
+            // --------------------------------------------
+            // We removed chunking → must remove header + add Content-Length
             if cleaned.len() > 0 {
                 if let Some(h_end) = response_buffer.windows(4).position(|w| w == b"\r\n\r\n") {
 
@@ -1159,7 +1228,7 @@ async fn handle_client(
                     .filter(|l| !l.to_lowercase().starts_with("transfer-encoding"))
                     .collect::<Vec<_>>()
                     .join("\r\n");
-
+                // Add correct Content-Length
                 let new_headers = format!(
                     "{}\r\nContent-Length: {}\r\n\r\n",
                     filtered_headers,
@@ -1175,7 +1244,9 @@ async fn handle_client(
         
         
         } else {
-            // fallback: content-length
+            // --------------------------------------------
+            // STEP 13.B: Non-chunked (Content-Length based)
+            // --------------------------------------------
             let content_length = headers_str
                 .lines()
                 .find(|l| l.to_lowercase().starts_with("content-length"))
@@ -1194,24 +1265,29 @@ async fn handle_client(
         }
 
 
-        // ---- STEP 11: Parse OpenAI response ----
-        // Extract token usage from JSON
-        // (only for /chat/completions)
-        // ---- STEP 11: Parse OpenAI response ----
+        // ============================================================
+        // ---- STEP 14: Decode + Parse OpenAI response
+        // ============================================================-
+        
         println!("HEADERS:\n{}", headers_str);
 
+        // Detect gzip compression
         let is_gzip = headers_str
             .lines()
             .any(|l| l.to_lowercase().starts_with("content-encoding: gzip"));
 
         println!("IS GZIP: {}", is_gzip);
 
+        // Extract body from response
         if let Some(split_pos) = response_buffer
             .windows(4)
             .position(|w| w == b"\r\n\r\n")
         {
             let body = &response_buffer[split_pos + 4..];
 
+            // --------------------------------------------
+            // STEP 14.1: Handle compression
+            // --------------------------------------------
             let body_bytes = if is_gzip {
                 let mut d = GzDecoder::new(body);
                 let mut decompressed = Vec::new();
@@ -1227,14 +1303,19 @@ async fn handle_client(
             } else {
                 body.to_vec()
             };
+            // --------------------------------------------
+            // STEP 14.2: Convert bytes → UTF-8 string
+            // --------------------------------------------
 
             if let Ok(body_str_raw) = std::str::from_utf8(&body_bytes) {
 
                 let body_str = body_str_raw.to_string();
-                // 🔥 DEBUG
+                // DEBUG
                 //println!("BODY DEBUG:\n{}\n----END----", body_str);
 
-                // 🔥 extract JSON safely
+                // --------------------------------------------
+                // STEP 14.3: Parse JSON
+                // --------------------------------------------
                 if let Some(start) = body_str.find('{') {
                     if let Some(end) = body_str.rfind('}') {
                     
@@ -1245,11 +1326,11 @@ async fn handle_client(
 
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
                         
-                        // ✅ FIX: extract model from response
+                        //extract model from response
                         if let Some(m) = json.get("model").and_then(|v| v.as_str()) {
-                            model = m.to_string();
+                            model = normalize_model(m);
                         }
-
+                        // Extract token usage
                         if let Some(usage) = json.get("usage") {
 
                             prompt_tokens = usage.get("prompt_tokens")
@@ -1288,10 +1369,10 @@ async fn handle_client(
     }
         
 
-        // 🚨 send EXACT same bytes (do not modify)
+        // Step 15. Send Response Back
         let _ = client.write_all(&response_buffer).await;
 
-        // ---- CACHE STORE ----
+        // Step 16.---- CACHE STORE ----
         if should_parse && !body_str.is_empty() && model != "unknown" {
 
             let db = db_client.clone();
@@ -1329,7 +1410,7 @@ async fn handle_client(
     // close client connection cleanly
     let _ = client.shutdown().await;
     
-    // ---- STEP 13: Update usage stats ----
+    // ---- STEP 17: Update usage stats ----
     // latency, errors, cost
 
     // 🔥 calculate cost once (outside block)
@@ -1368,7 +1449,7 @@ async fn handle_client(
         model_entry.requests += 1;
     }
 
-    // ---- STEP 13.5: Save to DB (async, non-blocking) ----
+    // ---- STEP 17.A: Save to DB (async, non-blocking) ----
     let db = db_client.clone();
     let user_id_clone = user_id.clone();
     let route = req.path.clone();
@@ -1391,7 +1472,7 @@ async fn handle_client(
         ).await;
     });
 
-    // ---- STEP 14: Final request log ----
+    // ---- STEP 17.B: Final request log ----
     log_request(
         &req,
         start,
