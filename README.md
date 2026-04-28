@@ -766,8 +766,13 @@ Requests/sec: ~60,000
 
 ## License
 
-Free for personal use
-Commercial use requires permission
+This project is source-available.
+
+You are free to use, modify, and run this project for personal and non-commercial purposes.
+
+For commercial use, please contact for permission.
+
+📩 Contact: dncsoftwarehelp@gmail.com
 
 ## 💬 Early Access / Setup Help
 
